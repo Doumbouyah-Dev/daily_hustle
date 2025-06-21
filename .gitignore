@@ -1,0 +1,129 @@
+# ---------------------------------------------------
+# Global Ignores (Applies to all parts of the project)
+# ---------------------------------------------------
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.Trashes
+
+# IDE-specific files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.vscode-test/
+*.code-workspace
+.project
+.pydevproject
+.settings/
+
+# Log files
+*.log
+logs/
+tmp/*.log
+
+# Configuration files (sensitive or local-only)
+.env                    # For python-dotenv, dotenv-webpack, etc.
+.flaskenv               # Flask-specific environment variables
+
+# ---------------------------------------------------
+# Python Backend Specific (.gitignore for backend/)
+# ---------------------------------------------------
+
+# Byte-compiled / optimized / DLL files
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyd
+backend/*.pyo
+backend/*.egg-info/
+backend/.eggs/
+
+# Distribution / packaging
+backend/dist/
+backend/build/
+backend/*.egg
+backend/*.whl
+
+# Virtual environment
+backend/.venv/
+backend/env/
+backend/venv/
+backend/ENV/
+backend/env.bak/
+backend/venv.bak/
+
+# Flask specific
+backend/instance/       # Default Flask instance folder for config, etc.
+backend/tmp/            # Temporary files (e.g., uploaded files before processing)
+
+# Database files
+backend/*.db
+backend/*.sqlite
+backend/*.sqlite3
+backend/data/*.db       # If you keep DBs in a 'data' folder inside backend
+
+# Test coverage
+backend/.coverage
+backend/.coverage.*
+backend/htmlcov/
+
+# Python installer issues
+backend/pip-log.txt
+backend/pip-delete-this-arg.txt
+
+# MyPy cache
+backend/.mypy_cache/
+
+# Pytest cache
+backend/.pytest_cache/
+
+# mkdocs
+backend/.cache/
+
+# Miscellaneous
+backend/*.swp
+backend/*.bak
+backend/*~
+backend/*.py[cod]
+
+# ---------------------------------------------------
+# JavaScript Frontend Specific (.gitignore for frontend/)
+# (Will apply to both mobile_app and web_app)
+# ---------------------------------------------------
+
+# Node modules
+frontend/*/node_modules/ # Catches node_modules in both mobile_app and web_app
+
+# Build output directories
+frontend/*/build/       # Catches 'build' folders if used by create-react-app or similar
+frontend/*/dist/        # Catches 'dist' folders
+
+# React Native / Expo specific
+frontend/mobile_app/.expo/
+frontend/mobile_app/.expo-shared/
+frontend/mobile_app/web-build/
+frontend/mobile_app/android/build/
+frontend/mobile_app/ios/build/
+frontend/mobile_app/ios/Pods/
+frontend/mobile_app/ios/.xcode.env.local
+frontend/mobile_app/*.jks # Android keystores
+
+# Yarn
+frontend/*/yarn-error.log
+frontend/*/.yarn/
+frontend/*/.pnp.*
+
+# npm
+frontend/*/npm-debug.log*
+frontend/*/package-lock.json # If you prefer not to commit it (though often committed)
+
+# Mac & Windows
+frontend/*/.DS_Store
+frontend/*/Thumbs.db
+
+# VS Code specific for frontend (if separate .vscode folders exist)
+frontend/*/.vscode/

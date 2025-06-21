@@ -1,0 +1,419 @@
+from functools import wraps
+from flask import request, jsonify
+from app.models import Users, UserRole
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user_id = request.headers.get("X-User-ID")
+        if not user_id:
+            return jsonify({"message": "Missing user ID in headers"}), 401
+
+        user = Users.query.get(user_id)
+        if not user or user.role != UserRole.ADMIN:
+            return jsonify({"message": "Admin privileges required"}), 403
+
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+from flask import request,  current_app
+from flask_restful import Resource
+from ...models import Users
+from werkzeug.security import check_password_hash
+import jwt
+import datetime
+
+
+class LoginResource(Resource):
+    def post(self):
+        data = request.get_json()
+        user = Users.query.filter_by(email=data["email"]).first()
+
+        if user and check_password_hash(user.password, data["password"]):
+            token = jwt.encode({
+                "user_id": user.id,
+                "role": user.role.name,
+                "exp": datetime.datetime.utcnow() + datetime.timedelta(days=1)
+            }, current_app.config["SECRET_KEY"], algorithm="HS256") # Use app.config
+            return {"access_token": token}, 200
+        return {"message": "Invalid credentials"}, 401
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from typing import List
+from datetime import datetime, date, timedelta
+from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy import or_
+from werkzeug.security import generate_password_hash, check_password_hash
+import hashlib
+import pytz
+import moment
+from app import app, db # Assuming 'app' and 'db' are initialized correctly in app/__init__.py
+import enum
+
+
+# -------------------- Enums --------------------
+
+class UserRole(enum.Enum):
+    CUSTOMER = "customer"
+    PROVIDER = "provider"
+    ADMIN = "admin"
+    B2B_CLIENT = "b2b_client"
+
+class PricingModel(enum.Enum):
+    FIXED = "fixed"
+    HOURLY = "hourly"
+    AREA_BASED = "area_based"
+
+class BookingStatus(enum.Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class Users(db.Model):
+    __tablename__ = 'users' # Explicitly set table name for clarity
+    id = db.Column(db.Integer, primary_key=True, index=True)
+    firstname = db.Column(db.String(50))
+    lastname = db.Column(db.String(50))
+    username = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    gender = db.Column(db.String(10))
+    role = db.Column(db.Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)
+    is_verified = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True) # For soft delete
+    address = db.Column(db.String(200))
+    phone = db.Column(db.String(20), unique=True, index=True)
+    password = db.Column(db.String(255), nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    last_login_at = db.Column(db.DateTime, nullable=True) # New field for last login timestamp
+    email_verification_token = db.Column(db.String(255), nullable=True) # New field for email verification token
+    email_verified_at = db.Column(db.DateTime, nullable=True) # New field for email verification timestamp
+    phone_verification_token = db.Column(db.String(255), nullable=True) # New field for phone verification token
+    phone_verified_at = db.Column(db.DateTime, nullable=True) # New field for phone verification timestamp
+    password_reset_token = db.Column(db.String(255), nullable=True) # New field for password reset token
+    password_reset_expiration = db.Column(db.DateTime, nullable=True) # New field for password reset token expiration
+
+    provider = db.relationship('Provider', backref='user', uselist=False, lazy='joined', cascade="all, delete-orphan")
+    bookings = db.relationship('Booking', backref='customer', lazy='dynamic')
+    payments = db.relationship('Payment', backref='user', lazy='dynamic')
+    reviews = db.relationship('Review', backref='user', lazy='dynamic')
+    notifications = db.relationship('Notifications', backref='user', lazy='dynamic')
+
+
+    def __init__(self, **kwargs):
+        super(Users, self).__init__(**kwargs)
+        if 'password' in kwargs:
+            # Use bcrypt by explicitly specifying the method
+            self.set_password(kwargs['password'])
+
+    def set_password(self, password):
+        self.password = generate_password_hash(password, method='bcrypt')
+
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        # Soft delete for Users model
+        if self.__tablename__ == 'users':
+            self.is_active = False
+            db.session.add(self)
+        else:
+            db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_username(cls, username):
+        return cls.query.filter_by(username=username).first()
+
+    @classmethod
+    def find_by_email(cls, email):
+        return cls.query.filter_by(email=email).first()
+
+    @classmethod
+    def find_by_phone(cls, phone):
+        return cls.query.filter_by(phone=phone).first()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+
+class ServiceCategory(db.Model):
+    __tablename__ = 'service_categories'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    description = db.Column(db.String(255), nullable=True)
+
+    services = db.relationship('Service', backref='category', lazy='dynamic')
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_name(cls, name):
+        return cls.query.filter_by(name=name).first()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_all(cls):
+        return cls.query.all()
+
+
+
+class Service(db.Model):
+    __tablename__ = 'services'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(LONGTEXT, nullable=True)
+    category_id = db.Column(db.Integer, db.ForeignKey('service_categories.id', ondelete='SET NULL'), nullable=True)
+    pricing_model = db.Column(db.Enum(PricingModel), default=PricingModel.FIXED, nullable=False)
+    base_price = db.Column(db.Float, nullable=False)
+    unit_label = db.Column(db.String(50), nullable=True) # e.g., "per hour", "per sq meter", "fixed"
+    estimated_duration = db.Column(db.Integer, nullable=True) # in minutes
+    requires_materials = db.Column(db.Boolean, default=False)
+    has_add_ons = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True) # Allows deactivating a service
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    add_ons = db.relationship('ServiceAddOn', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+    bookings = db.relationship('Booking', backref='service', lazy='dynamic')
+    providers = db.relationship('ProviderService', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_name(cls, name):
+        return cls.query.filter_by(name=name).first()
+
+    @classmethod
+    def find_all(cls):
+        return cls.query.all()
+
+
+class Provider(db.Model):
+    __tablename__ = 'providers'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), unique=True, nullable=False)
+    bio = db.Column(db.String(500), nullable=True)
+    rating = db.Column(db.Float, default=5.0)
+    is_available = db.Column(db.Boolean, default=True)
+
+    bookings = db.relationship('Booking', backref='provider', lazy='dynamic')
+    reviews_received = db.relationship('Review', backref='provider', lazy='dynamic')
+    services_offered = db.relationship('ProviderService', backref='provider', lazy='dynamic', cascade="all, delete-orphan")
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_user_id(cls, user_id):
+        return cls.query.filter_by(user_id=user_id).first()
+
+
+class ServiceAddOn(db.Model):
+    __tablename__ = 'service_add_ons'
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    is_active = db.Column(db.Boolean, default=True) # Allows deactivating an add-on
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class ProviderService(db.Model):
+    __tablename__ = 'provider_services'
+    id = db.Column(db.Integer, primary_key=True)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    # Could add specific pricing for this provider-service combination if needed
+    # price = db.Column(db.Float, nullable=True)
+
+    # Ensures a provider offers a specific service only once
+    __table_args__ = (db.UniqueConstraint('provider_id', 'service_id', name='_provider_service_uc'),)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+# -------------------- Bookings --------------------
+class Booking(db.Model):
+    __tablename__ = 'bookings'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='SET NULL'), nullable=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='SET NULL'), nullable=False)
+    status = db.Column(db.Enum(BookingStatus), default=BookingStatus.PENDING, nullable=False)
+    scheduled_at = db.Column(db.DateTime, nullable=False)
+    location = db.Column(db.String(255), nullable=False) # e.g., client's address
+    notes = db.Column(LONGTEXT, nullable=True)
+    total_cost = db.Column(db.Float, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    payment = db.relationship('Payment', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
+    review = db.relationship('Review', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Payment(db.Model):
+    __tablename__ = 'payments'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(50), nullable=True) # e.g., "credit_card", "paypal", "cash"
+    status = db.Column(db.String(20), default="pending", nullable=False) # e.g., "pending", "completed", "failed", "refunded"
+    transaction_ref = db.Column(db.String(100), unique=True, nullable=True) # Payment gateway transaction reference
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_booking_id(cls, booking_id):
+        return cls.query.filter_by(booking_id=booking_id).first()
+
+
+class Review(db.Model):
+    __tablename__ = 'reviews'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
+    rating = db.Column(db.Integer, nullable=False) # e.g., 1 to 5 stars
+    comment = db.Column(LONGTEXT, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Notifications(db.Model):
+    __tablename__ = 'notifications'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    message = db.Column(LONGTEXT, nullable=False)
+    type = db.Column(db.String(50), nullable=True) # e.g., "booking_confirmation", "payment_alert", "system_message"
+    status = db.Column(db.String(20), default="sent", nullable=False) # e.g., "sent", "delivered", "failed"
+    is_read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_all_for_user(cls, user_id):
+        return cls.query.filter_by(user_id=user_id).order_by(cls.created_at.desc()).all()
+        
+
+

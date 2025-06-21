@@ -1,0 +1,1995 @@
+#-------------------------------Below here are the Models --------------------------------
+models.py:
+# This is the models in app/models.py:
+from typing import List
+from datetime import datetime, date, timedelta, time
+# from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy import or_
+from werkzeug.security import generate_password_hash, check_password_hash
+import hashlib
+import pytz
+import moment
+from app import app, db # Assuming 'app' and 'db' are initialized correctly in app/__init__.py
+import enum
+
+
+# -------------------- Enums --------------------
+
+class UserRole(enum.Enum):
+    CUSTOMER = "customer" # Represents a standard user who books services.
+    PROVIDER = "provider" # Represents a service provider.
+    ADMIN = "admin"       # Represents an administrator with full control.
+    B2B_CLIENT = "b2b_client" # Represents a business client.
+
+class PricingModel(enum.Enum):
+    FIXED = "fixed"
+    HOURLY = "hourly"
+    AREA_BASED = "area_based"
+
+class BookingStatus(enum.Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+class VerificationStatus(enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+class NotificationType(enum.Enum):
+    BOOKING_CONFIRMATION = "booking_confirmation"
+    BOOKING_REMINDER = "booking_reminder"
+    BOOKING_UPDATE = "booking_update"
+    PAYMENT_REMINDER = "payment_reminder"
+    PAYMENT_CONFIRMATION = "payment_confirmation"
+    REVIEW_REQUEST = "review_request"
+    SYSTEM_MESSAGE = "system_message"
+    PROVIDER_VERIFICATION = "provider_verification"
+
+
+class Users(db.Model):
+    __tablename__ = 'users' # Explicitly set table name for clarity
+    id = db.Column(db.Integer, primary_key=True, index=True)
+    firstname = db.Column(db.String(50))
+    lastname = db.Column(db.String(50))
+    username = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    gender = db.Column(db.String(10))
+    role = db.Column(db.Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)
+    is_verified = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True) # For soft delete
+    address = db.Column(db.String(200))
+    phone = db.Column(db.String(20), unique=True, index=True)
+    password = db.Column(db.String(255), nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    last_login_at = db.Column(db.DateTime, nullable=True) # New field for last login timestamp
+    email_verification_token = db.Column(db.String(255), nullable=True) # New field for email verification token
+    email_verified_at = db.Column(db.DateTime, nullable=True) # New field for email verification timestamp
+    phone_verification_token = db.Column(db.String(255), nullable=True) # New field for phone verification token
+    phone_verified_at = db.Column(db.DateTime, nullable=True) # New field for phone verification timestamp
+    password_reset_token = db.Column(db.String(255), nullable=True) # New field for password reset token
+    password_reset_expiration = db.Column(db.DateTime, nullable=True) # New field for password reset token expiration
+
+    provider = db.relationship('Provider', backref='user', uselist=False, lazy='joined', cascade="all, delete-orphan")
+    bookings = db.relationship('Booking', backref='customer', lazy='dynamic')
+    payments = db.relationship('Payment', backref='user', lazy='dynamic')
+    reviews = db.relationship('Review', backref='user', lazy='dynamic')
+    notifications = db.relationship('Notifications', backref='user', lazy='dynamic')
+
+
+    def __init__(self, **kwargs):
+        super(Users, self).__init__(**kwargs)
+        if 'password' in kwargs:
+            # Use bcrypt by explicitly specifying the method
+            self.set_password(kwargs['password'])
+
+    def set_password(self, password):
+        self.password = generate_password_hash(password, method='bcrypt')
+
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        # Soft delete for Users model
+        if self.__tablename__ == 'users':
+            self.is_active = False
+            db.session.add(self)
+        else:
+            db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_username(cls, username):
+        return cls.query.filter_by(username=username).first()
+
+    @classmethod
+    def find_by_email(cls, email):
+        return cls.query.filter_by(email=email).first()
+
+    @classmethod
+    def find_by_phone(cls, phone):
+        return cls.query.filter_by(phone=phone).first()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Provider(db.Model):
+    __tablename__ = 'providers'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), unique=True, nullable=False)
+    bio = db.Column(db.String(500), nullable=True)
+    rating = db.Column(db.Float, default=5.0)
+    is_available = db.Column(db.Boolean, default=True)
+    service_radius = db.Column(db.Float, nullable=True) # e.g., in miles or kilometers
+    service_area_description = db.Column(db.String(255), nullable=True) # e.g., "Serves all of NYC", "Zip Codes: 10001, 10002"
+    verification_status = db.Column(db.Enum(VerificationStatus), default=VerificationStatus.PENDING, nullable=False)
+    verification_document_url = db.Column(db.String(255), nullable=True) # URL to uploaded verification document
+
+    bookings = db.relationship('Booking', backref='provider', lazy='dynamic')
+    reviews_received = db.relationship('Review', backref='provider', lazy='dynamic')
+    services_offered = db.relationship('ProviderService', backref='provider', lazy='dynamic', cascade="all, delete-orphan")
+    schedules = db.relationship('ProviderSchedule', backref='provider', lazy='dynamic', cascade="all, delete-orphan")
+    specializations = db.relationship('ProviderSpecialization', backref='provider', lazy='dynamic', cascade="all, delete-orphan")
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_user_id(cls, user_id):
+        return cls.query.filter_by(user_id=user_id).first()
+
+
+class ServiceCategory(db.Model):
+    __tablename__ = 'service_categories'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), unique=True, nullable=False)
+    description = db.Column(db.String(255), nullable=True)
+
+    services = db.relationship('Service', backref='category', lazy='dynamic')
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_name(cls, name):
+        return cls.query.filter_by(name=name).first()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_all(cls):
+        return cls.query.all()
+
+
+class Service(db.Model):
+    __tablename__ = 'services'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    category_id = db.Column(db.Integer, db.ForeignKey('service_categories.id', ondelete='SET NULL'), nullable=True)
+    pricing_model = db.Column(db.Enum(PricingModel), default=PricingModel.FIXED, nullable=False)
+    base_price = db.Column(db.Float, nullable=False)
+    unit_label = db.Column(db.String(50), nullable=True) # e.g., "per hour", "per sq meter", "fixed"
+    estimated_duration = db.Column(db.Integer, nullable=True) # in minutes
+    requires_materials = db.Column(db.Boolean, default=False)
+    has_add_ons = db.Column(db.Boolean, default=False)
+    is_active = db.Column(db.Boolean, default=True) # Allows deactivating a service
+    image_url = db.Column(db.String(255), nullable=True) # New field for service image
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    add_ons = db.relationship('ServiceAddOn', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+    bookings = db.relationship('Booking', backref='service', lazy='dynamic')
+    providers = db.relationship('ProviderService', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+    availability_slots = db.relationship('ServiceAvailability', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+    area_pricing_rules = db.relationship('AreaPricingRule', backref='service', lazy='dynamic', cascade="all, delete-orphan")
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_name(cls, name):
+        return cls.query.filter_by(name=name).first()
+
+    @classmethod
+    def find_all(cls):
+        return cls.query.all()
+
+
+class ServiceAddOn(db.Model):
+    __tablename__ = 'service_add_ons'
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.String(255), nullable=True) # New field for add-on description
+    price = db.Column(db.Float, nullable=False)
+    is_active = db.Column(db.Boolean, default=True) # Allows deactivating an add-on
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class ServiceAvailability(db.Model):
+    __tablename__ = 'service_availability'
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    day_of_week = db.Column(db.Integer, nullable=False) # 0 for Monday, 6 for Sunday
+    start_time = db.Column(db.Time, nullable=False) # e.g., time(9, 0) for 9:00 AM
+    end_time = db.Column(db.Time, nullable=False) # e.g., time(17, 0) for 5:00 PM
+
+    __table_args__ = (db.UniqueConstraint('service_id', 'day_of_week', name='_service_day_uc'),)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class AreaPricingRule(db.Model):
+    __tablename__ = 'area_pricing_rules'
+    id = db.Column(db.Integer, primary_key=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    min_area = db.Column(db.Float, nullable=True)
+    max_area = db.Column(db.Float, nullable=True)
+    price_per_unit = db.Column(db.Float, nullable=False) # Price per sq foot/meter
+    base_fee = db.Column(db.Float, default=0.0) # Optional fixed fee for area-based services
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class ProviderService(db.Model):
+    __tablename__ = 'provider_services'
+    id = db.Column(db.Integer, primary_key=True)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
+    # Could add specific pricing for this provider-service combination if needed
+    # price = db.Column(db.Float, nullable=True)
+
+    # Ensures a provider offers a specific service only once
+    __table_args__ = (db.UniqueConstraint('provider_id', 'service_id', name='_provider_service_uc'),)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+
+class ProviderSchedule(db.Model):
+    __tablename__ = 'provider_schedules'
+    id = db.Column(db.Integer, primary_key=True)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    available_date = db.Column(db.Date, nullable=False) # The specific date the provider is available
+    start_time = db.Column(db.Time, nullable=False) # Start time of availability slot
+    end_time = db.Column(db.Time, nullable=False) # End time of availability slot
+
+    # Ensures a provider doesn't have overlapping schedules for a given date
+    __table_args__ = (db.UniqueConstraint('provider_id', 'available_date', 'start_time', 'end_time', name='_provider_schedule_uc'),)
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class ProviderSpecialization(db.Model):
+    __tablename__ = 'provider_specializations'
+    id = db.Column(db.Integer, primary_key=True)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=True) # Can be NULL if specialization is general
+    specialization_description = db.Column(db.String(255), nullable=False) # e.g., "Pipe repair", "Boiler installation"
+
+    __table_args__ = (db.UniqueConstraint('provider_id', 'service_id', 'specialization_description', name='_provider_spec_uc'),)
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Booking(db.Model):
+    __tablename__ = 'bookings'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='SET NULL'), nullable=True)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='SET NULL'), nullable=False)
+    status = db.Column(db.Enum(BookingStatus), default=BookingStatus.PENDING, nullable=False)
+    scheduled_at = db.Column(db.DateTime, nullable=False)
+    # Structured location fields
+    street_address = db.Column(db.String(255), nullable=False)
+    city = db.Column(db.String(100), nullable=False)
+    state = db.Column(db.String(100), nullable=True)
+    zip_code = db.Column(db.String(20), nullable=True)
+    latitude = db.Column(db.Float, nullable=True)
+    longitude = db.Column(db.Float, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    total_cost = db.Column(db.Float, nullable=False)
+    cancellation_reason = db.Column(db.String(255), nullable=True) # New field for cancellation reason
+    cancellation_fee = db.Column(db.Float, nullable=True) # New field for cancellation fee
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    payment = db.relationship('Payment', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
+    review = db.relationship('Review', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Payment(db.Model):
+    __tablename__ = 'payments'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    payment_method = db.Column(db.String(50), nullable=True) # e.g., "credit_card", "paypal", "cash"
+    status = db.Column(db.String(20), default="pending", nullable=False) # e.g., "pending", "completed", "failed", "refunded"
+    transaction_ref = db.Column(db.String(100), unique=True, nullable=True) # Payment gateway transaction reference
+    refund_amount = db.Column(db.Float, nullable=True) # New field for refund amount
+    refund_status = db.Column(db.String(20), nullable=True) # New field for refund status (e.g., 'initiated', 'completed', 'failed')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_by_booking_id(cls, booking_id):
+        return cls.query.filter_by(booking_id=booking_id).first()
+
+
+class Review(db.Model):
+    __tablename__ = 'reviews'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
+    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
+    rating = db.Column(db.Integer, nullable=False) # e.g., 1 to 5 stars
+    comment = db.Column(db.Text, nullable=True)
+    is_approved = db.Column(db.Boolean, default=False) # New field for moderation
+    moderation_notes = db.Column(db.String(255), nullable=True) # New field for moderation notes
+    provider_reply = db.Column(db.Text, nullable=True) # New field for provider's reply
+    provider_reply_at = db.Column(db.DateTime, nullable=True) # New field for provider reply timestamp
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+
+class Notifications(db.Model):
+    __tablename__ = 'notifications'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    type = db.Column(db.Enum(NotificationType), nullable=True) # Changed to use NotificationType enum
+    status = db.Column(db.String(20), default="sent", nullable=False) # e.g., "sent", "delivered", "failed"
+    is_read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def save_to_db(self):
+        db.session.add(self)
+        db.session.commit()
+
+    def delete_from_db(self):
+        db.session.delete(self)
+        db.session.commit()
+
+    @classmethod
+    def find_by_id(cls, _id):
+        return cls.query.filter_by(id=_id).first()
+
+    @classmethod
+    def find_all_for_user(cls, user_id):
+        return cls.query.filter_by(user_id=user_id).order_by(cls.created_at.desc()).all()
+
+
+#--------------------------------- Below here are the various resources ------------------------------------------------------
+# -----------here is the user.py--------
+# # File: app/resources/user.py
+
+# from flask import request
+# from flask_restful import Resource
+# from ..models import Users, UserRole
+
+# from app import db
+# from werkzeug.security import generate_password_hash, check_password_hash
+# from ..utils.decorators import admin_required
+# from app.schemas.user import UserProfileUpdateSchema, UserAdminUpdateSchema # Need a new schema for admin updates
+# from app.utils.decorators import jwt_required_wrapper, role_required, UserRole # Import new decorator
+
+
+
+# user_list_schema = UserSchema(many=True)
+
+# role_change_schema = RoleChangeRequestSchema()
+
+
+# class UserResource(Resource):
+#     @jwt_required_wrapper
+#     def get(self, user_id):
+#         user = Users.find_by_id(user_id)
+#         if not user:
+#             return {"message": "User not found"}, 404
+
+#         # Authorization: User can only view their own profile, or admin can view any
+#         if g.user.id != user.id and g.user.role != UserRole.ADMIN:
+#             return {"message": "Unauthorized access"}, 403
+
+#         schema = UserProfileUpdateSchema() # Using this for dumping too, for now
+#         return schema.dump(user), 200
+
+#     @jwt_required_wrapper
+#     def put(self, user_id):
+#         user = Users.find_by_id(user_id)
+#         if not user:
+#             return {"message": "User not found"}, 404
+
+#         # Determine which schema to use based on role and target user
+#         if g.user.role == UserRole.ADMIN:
+#             schema = UserAdminUpdateSchema(partial=True) # Allows partial updates, including is_active/role
+#         elif g.user.id == user.id:
+#             schema = UserProfileUpdateSchema(partial=True) # Standard user can update their profile
+#         else:
+#             return {"message": "Unauthorized access"}, 403
+
+#         try:
+#             data = schema.load(request.get_json(), partial=True) # partial=True for PUT
+#         except Exception as err:
+#             return {"message": str(err)}, 400
+
+#         # Prevent non-admins from changing their own role or is_active status
+#         if g.user.role != UserRole.ADMIN:
+#             if "role" in data or "is_active" in data:
+#                 return {"message": "Unauthorized to modify role or account status"}, 403
+
+#         # Apply updates
+#         for key, value in data.items():
+#             if hasattr(user, key):
+#                 if key == "password": # Handle password hashing if provided
+#                     user.set_password(value)
+#                 elif key == "role": # Convert string role to UserRole enum
+#                     user.role = UserRole(value)
+#                 else:
+#                     setattr(user, key, value)
+
+#         user.save_to_db()
+#         return {"message": "User updated successfully", "user": UserProfileUpdateSchema().dump(user)}, 200
+
+#     # Note: The original `delete_from_db` on Users model was modified for soft delete.
+#     # This delete method here will now trigger the soft delete.
+#     @role_required(UserRole.ADMIN) # Only admin can "delete" (soft-delete) users
+#     def delete(self, user_id):
+#         user = Users.find_by_id(user_id)
+#         if not user:
+#             return {"message": "User not found"}, 404
+
+#         if not user.is_active:
+#             return {"message": "User is already deactivated"}, 400
+
+#         user.delete_from_db() # This will now set is_active=False
+#         return {"message": "User deactivated successfully"}, 200
+
+# # class UserRegisterResource(Resource):
+# #     def post(self):
+# #         data = request.get_json()
+# #         user = user_schema.load(data)
+# #         user.set_password(data["password"])
+# #         user.save_to_db()
+# #         return user_schema.dump(user), 201
+
+# class UserLoginResource(Resource):
+#     def post(self):
+#         data = request.get_json()
+#         user = Users.find_by_email(data.get("email"))
+#         if user and user.check_password(data.get("password")):
+#             return {"message": "Login successful", "user": user_schema.dump(user)}, 200
+#         return {"message": "Invalid credentials"}, 401
+
+# class UserListResource(Resource):
+#     def get(self):
+#         users = Users.query.all()
+#         return user_list_schema.dump(users), 200
+
+
+#UserDetailResource, UserProfileUpdateResource
+# class UserRoleRequestResource(Resource):
+#     def post(self, user_id):
+#         user = Users.query.get_or_404(user_id)
+#         user.role = UserRole.PENDING_PROVIDER
+#         db.session.commit()
+#         return {"message": "Provider request submitted and pending admin approval."}, 200
+
+# UserRoleApprovalResource
+# ProviderProfileResource
+# UserRoleRequestResource
+# UserResource
+# UserListResource
+
+# class UserRoleApprovalResource(Resource):
+#     @admin_required
+#     def put(self, user_id):
+#         user = Users.query.get_or_404(user_id)
+#         if user.role == UserRole.PENDING_PROVIDER:
+#             user.role = UserRole.PROVIDER
+#             db.session.commit()
+#             return {"message": "User role updated to PROVIDER."}, 200
+#         return {"message": "No pending provider request."}, 400
+
+# app/resources/user.py
+from flask_restful import Resource
+from flask import request, jsonify, g
+from app.models import Users, UserRole, Provider, VerificationStatus # Import Provider model
+from app.schemas.user import (
+    UserSchema,
+    UserProfileUpdateSchema,
+    UserAdminUpdateSchema,
+    UserRoleRequestSchema,    # Corrected: for user's role request
+    RoleChangeApprovalSchema, # Corrected: for admin's approval of role change
+    ProviderProfileSchema,
+    UserUpdateSchema     # Added for provider profile updates
+)
+from app import db
+from app.utils.decorators import jwt_required_wrapper, role_required
+from app.utils.decorators import jwt_blacklist # Assuming this is available if needed for token revocation
+
+user_schema = UserSchema()
+user_update_schema = UserUpdateSchema()
+requested_role_enum = UserRoleRequestSchema()
+
+
+class UserDetailResource(Resource):
+    def get(self, user_id):
+        user = Users.query.get_or_404(user_id)
+        return user_schema.dump(user), 200
+
+    def delete(self, user_id):
+        user = Users.query.get_or_404(user_id)
+        user.delete_from_db()
+        return {"message": "User deleted"}, 204
+
+class UserProfileUpdateResource(Resource):
+    def put(self, user_id):
+        user = Users.query.get_or_404(user_id)
+        data = user_update_schema.load(request.get_json(), partial=True)
+        if not isinstance(data, dict):
+            return {"message": "Invalid input data."}, 400
+        for key, value in data.items():
+            setattr(user, key, value)
+        db.session.commit()
+        return user_schema.dump(user), 200
+# Resource for listing all users (Admin only) or self (jwt_required_wrapper handles G.user context)
+class UserListResource(Resource):
+    @role_required(UserRole.ADMIN)
+    def get(self):
+        users = Users.query.all()
+        # Exclude sensitive fields like password hash from schema dump
+        return UserSchema(many=True).dump(users), 200
+
+
+# Resource for a single user (GET, PUT, DELETE)
+class UserResource(Resource):
+    @jwt_required_wrapper
+    def get(self, user_id):
+        user = Users.find_by_id(user_id)
+        if not user:
+            return {"message": "User not found"}, 404
+
+        # Authorization: User can only view their own profile, or admin can view any
+        if g.user.id != user.id and g.user.role != UserRole.ADMIN:
+            return {"message": "Unauthorized access"}, 403
+
+        # Use UserSchema for dumping data
+        return UserSchema().dump(user), 200
+
+    @jwt_required_wrapper
+    def put(self, user_id):
+        user = Users.find_by_id(user_id)
+        if not user:
+            return {"message": "User not found"}, 404
+
+        # Determine which schema to use based on role and target user
+        if g.user.role == UserRole.ADMIN:
+            schema = UserAdminUpdateSchema(partial=True) # Allows partial updates, including is_active/role
+        elif g.user.id == user.id:
+            schema = UserProfileUpdateSchema(partial=True) # Standard user can update their profile
+        else:
+            return {"message": "Unauthorized access"}, 403
+
+        try:
+            data = schema.load(request.get_json()) # partial=True is set in schema init
+        except Exception as err: # Catch Marshmallow ValidationError specifically if possible
+            return {"message": str(err)}, 400
+
+        # Prevent non-admins from changing their own role or is_active status
+        if g.user.role != UserRole.ADMIN:
+            if isinstance(data, dict) and ("role" in data or "is_active" in data or "is_verified" in data):
+                return {"message": "Unauthorized to modify role, account status, or verification status"}, 403
+
+        # Apply updates
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if hasattr(user, key):
+                    if key == "password": # This case is now handled by UserPasswordChangeResource
+                        pass # Do nothing here, password changes should go to dedicated endpoint
+                    elif key == "role": # Convert string role to UserRole enum
+                        user.role = UserRole(value)
+                    else:
+                        setattr(user, key, value)
+        else:
+            return {"message": "Invalid input data."}, 400
+
+        user.save_to_db()
+        return {"message": "User updated successfully", "user": UserSchema().dump(user)}, 200
+
+    @role_required(UserRole.ADMIN) # Only admin can "delete" (soft-delete) users
+    def delete(self, user_id):
+        user = Users.find_by_id(user_id)
+        if not user:
+            return {"message": "User not found"}, 404
+
+        if not user.is_active:
+            return {"message": "User is already deactivated"}, 400
+
+        user.delete_from_db() # This will now set is_active=False
+        return {"message": "User deactivated successfully"}, 200
+
+
+# Resource for a user to request a role change (e.g., to Provider)
+
+class UserRoleRequestResource(Resource):
+    @jwt_required_wrapper
+    def post(self):
+        user = g.user
+        if user.role != UserRole.CUSTOMER:
+            return {"message": "Only customers can request a role change."}, 400
+
+        schema = UserRoleRequestSchema()
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        if not isinstance(data, dict) or "requested_role" not in data:
+            return {"message": "Invalid input data: 'requested_role' is required."}, 400
+        requested_role_enum = UserRole(data["requested_role"])
+
+        # Check if they are already requesting or are already that role
+        if user.role == requested_role_enum:
+            return {"message": f"You are already a {requested_role_enum.value}."}, 400
+
+        # In a real application, you would save this request to a 'RoleChangeRequest' model
+        # and an admin would review it. For now, we'll simulate it directly or add a placeholder.
+        # For this example, let's just create the provider profile immediately if requested
+        # and set the user's role to pending verification for provider.
+
+        if requested_role_enum == UserRole.PROVIDER:
+            # Check if provider profile already exists
+            existing_provider = Provider.find_by_user_id(user.id)
+            if existing_provider:
+                return {"message": "You already have a provider profile."}, 400
+
+            # Create a new Provider entry for the user
+            # Ensure 'data' is a dict and use correct Provider model parameters
+            bio = data["message"] if isinstance(data, dict) and "message" in data else "New provider registration."
+            provider = Provider(user=user, description=bio)
+            # If your Provider model supports setting verification status after creation:
+            provider.verification_status = VerificationStatus.PENDING
+            try:
+                provider.save_to_db()
+                user.role = UserRole.PROVIDER # Set their role immediately (or change to a PENDING_PROVIDER role if exists)
+                user.is_verified = False # Provider needs to be verified
+                user.save_to_db()
+                return {"message": f"Provider profile created and status set to {provider.verification_status.value}. Please complete verification."}, 201
+            except Exception as e:
+                return {"message": f"Error creating provider profile: {str(e)}"}, 500
+        else:
+            return {"message": "Role change requests are only supported for Provider role at this time."}, 400
+
+# Resource for Admin to approve or reject role change requests
+class UserRoleApprovalResource(Resource):
+    @role_required(UserRole.ADMIN)
+    def post(self, user_id):
+        user = Users.find_by_id(user_id)
+        if not user:
+            return {"message": "User not found"}, 404
+
+        schema = RoleChangeApprovalSchema() # Corrected: using RoleChangeApprovalSchema
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        if not isinstance(data, dict):
+            return {"message": "Invalid input data."}, 400
+        action = data.get("action")
+        admin_notes = data.get("admin_notes")
+
+        if action == "approve":
+            # Assuming the role change was already initiated and user.role is e.g. UserRole.PROVIDER (pending verification)
+            # This endpoint now handles the approval of the *verification* for a provider.
+            if user.role == UserRole.PROVIDER:
+                provider = Provider.find_by_user_id(user.id)
+                if provider:
+                    provider.verification_status = VerificationStatus.APPROVED
+                    provider.save_to_db()
+                    user.is_verified = True # Mark user as verified as well
+                    user.save_to_db()
+                    return {"message": f"User {user.username} (Provider) has been approved and verified."}, 200
+                else:
+                    return {"message": "Provider profile not found for this user."}, 404
+            else:
+                return {"message": "User is not a provider or not pending verification for a role."}, 400
+
+        elif action == "reject":
+            # If a provider's verification is rejected, you might set their status back or mark them as unverified
+            if user.role == UserRole.PROVIDER:
+                provider = Provider.find_by_user_id(user.id)
+                if provider:
+                    provider.verification_status = VerificationStatus.REJECTED
+                    provider.save_to_db()
+                    user.is_verified = False # Mark user as unverified
+                    user.save_to_db()
+                    return {"message": f"User {user.username} (Provider) verification has been rejected."}, 200
+                else:
+                    return {"message": "Provider profile not found for this user."}, 404
+            else:
+                return {"message": "Cannot reject role change for non-provider or unrequested role."}, 400
+        else:
+            return {"message": "Invalid action specified."}, 400
+
+
+# Resource for Providers to update their specific profile fields
+class ProviderProfileResource(Resource):
+    @role_required(UserRole.PROVIDER) # Only a provider can update their provider profile
+    def put(self):
+        user = g.user # The authenticated user is the provider
+        provider = Provider.find_by_user_id(user.id)
+
+        if not provider:
+            return {"message": "Provider profile not found for this user."}, 404
+
+        schema = ProviderProfileSchema(partial=True)
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if hasattr(provider, key):
+                    if key == "verification_status": # Prevent providers from changing their own verification status
+                        return {"message": "Unauthorized to modify verification status."}, 403
+                    setattr(provider, key, value)
+        else:
+            return {"message": "Invalid input data."}, 400
+
+        provider.save_to_db()
+        return {"message": "Provider profile updated successfully", "provider": ProviderProfileSchema().dump(provider)}, 200
+
+    @role_required(UserRole.PROVIDER)
+    def get(self):
+        user = g.user
+        provider = Provider.find_by_user_id(user.id)
+        if not provider:
+            return {"message": "Provider profile not found."}, 404
+        return ProviderProfileSchema().dump(provider), 200
+
+# ------------user_password.py-----------------
+from flask_restful import Resource
+from flask import request, jsonify, g
+from app.models import Users
+from app.schemas.user import UserPasswordChangeSchema
+from app.utils.decorators import jwt_required_wrapper, jwt_blacklist # Import the blacklist for revocation
+
+class UserPasswordChangeResource(Resource):
+    @jwt_required_wrapper
+    def post(self):
+        schema = UserPasswordChangeSchema()
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        user = g.user # User object from JWT context
+        if not user.check_password(data["old_password"]):
+            return {"message": "Incorrect old password."}, 401
+
+        user.set_password(data["new_password"])
+        user.save_to_db()
+
+        # Revoke all existing tokens for this user after password change
+        # This requires a more sophisticated JWT invalidation strategy (e.g., storing jti in DB per user)
+        # For simplicity, here we'll just indicate that tokens should be invalidated.
+        # In a real system, you'd mark ALL tokens for this user as invalid in your blocklist DB table.
+        # For this quick demo, we just inform the client to re-login.
+        # A more robust solution might involve updating a 'password_last_changed_at' timestamp
+        # in the user model and checking it in the token_in_blocklist_loader.
+        jti = get_jwt()["jti"] # Only revoke the current token. More comprehensive revocation needed.
+        jwt_blacklist.add(jti)
+
+
+        return {"message": "Password changed successfully. Please log in again with your new password."}, 200
+
+#---------------service.py---------------------
+from flask import request
+from flask_restful import Resource
+from ..models import Service # Adjust import path
+from ..schemas.service import ServiceSchema
+from app import db
+
+service_schema = ServiceSchema()
+service_list_schema = ServiceSchema(many=True)
+
+
+class ServiceResource(Resource):
+    def get(self, service_id):
+        service = Service.query.get_or_404(service_id)
+        return service_schema.dump(service), 200
+
+    def put(self, service_id):
+        service = Service.query.get_or_404(service_id)
+        data = request.get_json()
+
+        service.name = data.get("name", service.name)
+        service.description = data.get("description", service.description)
+        service.category_id = data.get("category_id", service.category_id)
+        service.pricing_model = data.get("pricing_model", service.pricing_model)
+        service.base_price = data.get("base_price", service.base_price)
+        service.unit_label = data.get("unit_label", service.unit_label)
+        service.estimated_duration = data.get("estimated_duration", service.estimated_duration)
+        service.requires_materials = data.get("requires_materials", service.requires_materials)
+        service.has_add_ons = data.get("has_add_ons", service.has_add_ons)
+        service.is_active = data.get("is_active", service.is_active)
+
+        db.session.commit()
+        return service_schema.dump(service), 200
+
+    def delete(self, service_id):
+        service = Service.query.get_or_404(service_id)
+        db.session.delete(service)
+        db.session.commit()
+        return {"message": "Service deleted successfully."}, 204
+
+
+class ServiceListResource(Resource):
+    def get(self):
+        services = Service.query.all()
+        return service_list_schema.dump(services), 200
+
+    def post(self):
+        data = request.get_json()
+        try:
+            new_service = service_schema.load(data)
+        except Exception as e:
+            return {"message": f"Validation error: {str(e)}"}, 400
+
+        db.session.add(new_service)
+        db.session.commit()
+        return service_schema.dump(new_service), 201
+
+#-------------------review.py-----------------
+from flask import request
+from flask_restful import Resource
+from ..models import Review
+from ..schemas.review import ReviewSchema
+from .. import db
+
+review_schema = ReviewSchema()
+review_list_schema = ReviewSchema(many=True)
+
+class ReviewListResource(Resource):
+    def get(self):
+        return review_list_schema.dump(Review.query.all()), 200
+
+    def post(self):
+        data = request.get_json()
+        new_review = review_schema.load(data)
+        db.session.add(new_review)
+        db.session.commit()
+        return review_schema.dump(new_review), 201
+
+
+class ReviewResource(Resource):
+    def get(self, review_id):
+        review = Review.query.get_or_404(review_id)
+        return review_schema.dump(review), 200
+
+    def put(self, review_id):
+        review = Review.query.get_or_404(review_id)
+        data = request.get_json()
+        review.rating = data.get("rating", review.rating)
+        review.comment = data.get("comment", review.comment)
+        db.session.commit()
+        return review_schema.dump(review), 200
+
+    def delete(self, review_id):
+        review = Review.query.get_or_404(review_id)
+        db.session.delete(review)
+        db.session.commit()
+        return {"message": "Review deleted"}, 204
+
+#--------------------provider.py----------------------
+from flask import request
+from flask_restful import Resource
+from ..models import Users, UserRole
+from ..schemas.user import UserSchema
+from app import db
+
+provider_schema = UserSchema()
+provider_list_schema = UserSchema(many=True)
+
+class ProviderListResource(Resource):
+    def get(self):
+        providers = Users.query.filter_by(role=UserRole.PROVIDER).all()
+        return provider_list_schema.dump(providers), 200
+
+    def post(self):
+        data = request.get_json()
+        data["role"] = UserRole.PROVIDER.name  # Force role to PROVIDER
+        new_provider = provider_schema.load(data)
+        db.session.add(new_provider)
+        db.session.commit()
+        return provider_schema.dump(new_provider), 201
+
+
+class ProviderResource(Resource):
+    def get(self, provider_id):
+        provider = Users.query.filter_by(id=provider_id, role=UserRole.PROVIDER).first_or_404()
+        return provider_schema.dump(provider), 200
+
+    def put(self, provider_id):
+        provider = Users.query.filter_by(id=provider_id, role=UserRole.PROVIDER).first_or_404()
+        data = request.get_json()
+        for field in ["firstname", "lastname", "email", "phone", "address"]:
+            setattr(provider, field, data.get(field, getattr(provider, field)))
+        db.session.commit()
+        return provider_schema.dump(provider), 200
+
+    def delete(self, provider_id):
+        provider = Users.query.filter_by(id=provider_id, role=UserRole.PROVIDER).first_or_404()
+        db.session.delete(provider)
+        db.session.commit()
+        return {"message": "Provider deleted successfully"}, 204
+
+#--------------------payment.py-------------------
+from flask import request
+from flask_restful import Resource
+from ..models import Payment
+from ..schemas.payment import PaymentSchema
+from .. import db
+
+payment_schema = PaymentSchema()
+payment_list_schema = PaymentSchema(many=True)
+
+class PaymentListResource(Resource):
+    def get(self):
+        payments = Payment.query.all()
+        return payment_list_schema.dump(payments), 200
+
+    def post(self):
+        data = request.get_json()
+        try:
+            new_payment = payment_schema.load(data)
+        except Exception as e:
+            return {"message": f"Validation Error: {str(e)}"}, 400
+
+        db.session.add(new_payment)
+        db.session.commit()
+        return payment_schema.dump(new_payment), 201
+
+
+class PaymentResource(Resource):
+    def get(self, payment_id):
+        payment = Payment.query.get_or_404(payment_id)
+        return payment_schema.dump(payment), 200
+
+    def put(self, payment_id):
+        payment = Payment.query.get_or_404(payment_id)
+        data = request.get_json()
+
+        payment.status = data.get("status", payment.status)
+        payment.transaction_ref = data.get("transaction_ref", payment.transaction_ref)
+        db.session.commit()
+        return payment_schema.dump(payment), 200
+
+    def delete(self, payment_id):
+        payment = Payment.query.get_or_404(payment_id)
+        db.session.delete(payment)
+        db.session.commit()
+        return {"message": "Payment deleted"}, 204
+
+#----------------notification.py--------------------
+from flask import request
+from flask_restful import Resource
+from ..models import Notifications
+from ..schemas.notification import NotificationSchema
+from .. import db
+
+notification_schema = NotificationSchema()
+notification_list_schema = NotificationSchema(many=True)
+
+class NotificationListResource(Resource):
+    def get(self):
+        return notification_list_schema.dump(Notifications.query.all()), 200
+
+    def post(self):
+        data = request.get_json()
+        new_notification = notification_schema.load(data)
+        db.session.add(new_notification)
+        db.session.commit()
+        return notification_schema.dump(new_notification), 201
+
+
+class NotificationResource(Resource):
+    def get(self, notification_id):
+        notification = Notifications.query.get_or_404(notification_id)
+        return notification_schema.dump(notification), 200
+
+    def put(self, notification_id):
+        notification = Notifications.query.get_or_404(notification_id)
+        data = request.get_json()
+        notification.message = data.get("message", notification.message)
+        notification.is_read = data.get("is_read", notification.is_read)
+        db.session.commit()
+        return notification_schema.dump(notification), 200
+
+    def delete(self, notification_id):
+        notification = Notifications.query.get_or_404(notification_id)
+        db.session.delete(notification)
+        db.session.commit()
+        return {"message": "Notification deleted"}, 204
+
+#------------------category.py-------------------
+from flask import request
+from flask_restful import Resource
+from ..schemas.category import ServiceCategorySchema
+from app import db
+from ..models import ServiceCategory
+
+
+category_schema = ServiceCategorySchema()
+
+category_list_schema = ServiceCategorySchema(many=True)
+
+class ServiceCategoryResource(Resource):
+    def get(self, category_id):
+        category = ServiceCategory.query.get_or_404(category_id)
+        return category_schema.dump(category), 200
+
+    def put(self, category_id):
+        category = ServiceCategory.query.get_or_404(category_id)
+        data = request.get_json()
+        category.name = data.get("name", category.name)
+        db.session.commit()
+        return category_schema.dump(category), 200
+
+    def delete(self, category_id):
+        category = ServiceCategory.query.get_or_404(category_id)
+        db.session.delete(category)
+        db.session.commit()
+        return {"message": "Category deleted"}, 204
+
+class ServiceCategoryListResource(Resource):
+    def get(self):
+        return category_list_schema.dump(ServiceCategory.query.all()), 200
+
+    def post(self):
+        data = request.get_json()
+        new_category = category_schema.load(data)
+        db.session.add(new_category)
+        db.session.commit()
+        return category_schema.dump(new_category), 201
+
+#--------------booking.py---------------------
+from flask import request
+from flask_restful import Resource
+from ..models import Booking
+from ..schemas.booking import BookingSchema
+from app import db
+
+booking_schema = BookingSchema()
+booking_list_schema = BookingSchema(many=True)
+
+class BookingResource(Resource):
+    def get(self, booking_id):
+        booking = Booking.query.get_or_404(booking_id)
+        return booking_schema.dump(booking), 200
+
+    def put(self, booking_id):
+        booking = Booking.query.get_or_404(booking_id)
+        data = request.get_json()
+        for field in ["status", "scheduled_date", "scheduled_time", "address", "notes"]:
+            setattr(booking, field, data.get(field, getattr(booking, field)))
+        db.session.commit()
+        return booking_schema.dump(booking), 200
+
+    def delete(self, booking_id):
+        booking = Booking.query.get_or_404(booking_id)
+        db.session.delete(booking)
+        db.session.commit()
+        return {"message": "Booking cancelled"}, 204
+
+class BookingListResource(Resource):
+    def get(self):
+        return booking_list_schema.dump(Booking.query.all()), 200
+
+    def post(self):
+        data = request.get_json()
+        new_booking = booking_schema.load(data)
+        db.session.add(new_booking)
+        db.session.commit()
+        return booking_schema.dump(new_booking), 201
+
+#--------------admin.py-------------------
+from flask_restful import Resource
+from ..models import Users, UserRole
+from ..models import Booking
+from ..models import Service
+from app import db
+from .auth.utils import jwt_required
+
+class AdminStatsResource(Resource):
+    @jwt_required(allowed_roles=["ADMIN"])
+    def get(self):
+        return {
+            "total_users": Users.query.count(),
+            "total_providers": Users.query.filter_by(role=UserRole.PROVIDER).count(),
+            "total_bookings": Booking.query.count(),
+            "active_services": Service.query.filter_by(is_active=True).count(),
+        }, 200
+
+#------------------------addon.py---------------------
+from flask import request
+from flask_restful import Resource
+from ..models import ServiceAddOn
+from ..schemas.addon import ServiceAddOnSchema
+from app import db
+
+addon_schema = ServiceAddOnSchema()
+addon_list_schema = ServiceAddOnSchema(many=True)
+
+
+class ServiceAddOnResource(Resource):
+    def get(self, addon_id):
+        addon = ServiceAddOn.query.get_or_404(addon_id)
+        return addon_schema.dump(addon), 200
+
+    def put(self, addon_id):
+        addon = ServiceAddOn.query.get_or_404(addon_id)
+        data = request.get_json()
+
+        addon.name = data.get("name", addon.name)
+        addon.description = data.get("description", addon.description)
+        addon.price = data.get("price", addon.price)
+        addon.service_id = data.get("service_id", addon.service_id)
+
+        db.session.commit()
+        return addon_schema.dump(addon), 200
+
+    def delete(self, addon_id):
+        addon = ServiceAddOn.query.get_or_404(addon_id)
+        db.session.delete(addon)
+        db.session.commit()
+        return {"message": "Add-on deleted successfully"}, 204
+
+
+class ServiceAddOnListResource(Resource):
+    def get(self):
+        addons = ServiceAddOn.query.all()
+        return addon_list_schema.dump(addons), 200
+
+    def post(self):
+        data = request.get_json()
+        try:
+            new_addon = addon_schema.load(data)
+        except Exception as e:
+            return {"message": f"Validation error: {str(e)}"}, 400
+
+        db.session.add(new_addon)
+        db.session.commit()
+        return addon_schema.dump(new_addon), 201
+
+
+#----------------auth/login.py -------------------
+from flask_restful import Resource
+from datetime import datetime, timedelta
+from flask import g
+from flask import request, jsonify
+from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt
+from app.models import Users, UserRole # Assuming UserRole is defined
+from app.schemas.user import UserLoginSchema
+from app.utils.decorators import jwt_blacklist # Import the blacklist for revocation
+
+class UserLoginResource(Resource):
+    def post(self):
+        schema = UserLoginSchema()
+        try:
+            user_data = schema.load(request.get_json())
+        except Exception as err: # Use specific validation error if using Marshmallow's ValidationError
+            return {"message": str(err)}, 400
+
+        user = Users.find_by_email(user_data["email"]) or Users.find_by_username(user_data["username"])
+
+        if user and user.check_password(user_data["password"]):
+            # Ensure user is active for login
+            if not user.is_active:
+                return {"message": "Account is inactive. Please contact support."}, 403
+
+            # Update last login timestamp
+            user.last_login_at = datetime.utcnow()
+            user.save_to_db()
+
+            # Create access and refresh tokens
+            # We can add custom claims like user role here
+            additional_claims = {"role": user.role.value}
+            access_token = create_access_token(identity=user.id, additional_claims=additional_claims)
+            refresh_token = create_refresh_token(identity=user.id)
+
+            return {
+                "message": "Logged in successfully",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "user_id": user.id,
+                "role": user.role.value
+            }, 200
+        return {"message": "Invalid credentials"}, 401
+
+class TokenRefreshResource(Resource):
+    @jwt_required(refresh=True) # This decorator verifies the refresh token
+    def post(self):
+        current_user_id = get_jwt_identity()
+        user = Users.find_by_id(current_user_id)
+        if not user:
+            return jsonify({"message": "User not found for refresh token."}), 404
+
+        # Ensure the user is still active before issuing new tokens
+        if not user.is_active:
+            return {"message": "Account is inactive. Cannot refresh token."}, 403
+
+        # Create a new access token
+        additional_claims = {"role": user.role.value}
+        new_access_token = create_access_token(identity=current_user_id, additional_claims=additional_claims)
+        return {"access_token": new_access_token}, 200
+
+class UserLogoutResource(Resource):
+    @jwt_required()
+    def post(self):
+        jti = get_jwt()["jti"] # Get the JTI (JWT ID) of the current token
+        jwt_blacklist.add(jti) # Add it to the blacklist
+        return {"message": "Successfully logged out"}, 200
+
+#--------------------auth/password_reset.py-----------------
+from flask_restful import Resource
+from flask import request, jsonify
+from app.models import Users
+from app.schemas.user import PasswordResetRequestSchema, PasswordResetConfirmSchema
+from datetime import datetime, timedelta
+import uuid
+from app import app # For logging
+
+# Placeholder for email sending function (would use a real email service)
+def send_password_reset_email(email, token):
+    reset_link = f"http://yourfrontend.com/reset-password?token={token}"
+    print(f"DEBUG: Password reset link for {email}: {reset_link}")
+    # In a real application, you would use an email sending library/service here
+    # e.g., smtplib, Flask-Mail, SendGrid, Mailgun etc.
+    app.logger.info(f"Password reset email sent to {email} with token {token}")
+
+
+class PasswordResetRequestResource(Resource):
+    def post(self):
+        schema = PasswordResetRequestSchema()
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        user = Users.find_by_email(data["email"])
+        if user:
+            token = str(uuid.uuid4())
+            expiration = datetime.utcnow() + timedelta(hours=1) # Token valid for 1 hour
+            user.password_reset_token = token
+            user.password_reset_expiration = expiration
+            user.save_to_db()
+            send_password_reset_email(user.email, token)
+        # Always return a generic success message to prevent email enumeration
+        return {"message": "If an account with that email exists, a password reset link has been sent."}, 200
+
+class PasswordResetConfirmResource(Resource):
+    def post(self):
+        schema = PasswordResetConfirmSchema()
+        try:
+            data = schema.load(request.get_json())
+        except Exception as err:
+            return {"message": str(err)}, 400
+
+        user = Users.query.filter_by(password_reset_token=data["token"]).first()
+
+        if not user:
+            return {"message": "Invalid or expired token."}, 400
+
+        if user.password_reset_expiration < datetime.utcnow():
+            user.password_reset_token = None
+            user.password_reset_expiration = None
+            user.save_to_db()
+            return {"message": "Invalid or expired token."}, 400
+
+        user.set_password(data["new_password"])
+        user.password_reset_token = None
+        user.password_reset_expiration = None
+        user.save_to_db()
+
+        return {"message": "Password has been reset successfully."}, 200
+
+#--------------------auth/register.py--------------------
+from flask import request
+from flask_restful import Resource
+from ...models import Users, UserRole 
+from app import db
+from werkzeug.security import generate_password_hash
+from ...schemas.user import UserRegisterSchema, UserSchema
+
+user_schema = UserSchema()
+
+import uuid # For generating tokens
+from datetime import timedelta
+from app import app # Assuming app instance is available for config access
+
+class UserRegisterResource(Resource):
+    def post(self):
+        schema = UserRegisterSchema()
+        try:
+            user_data = schema.load(request.get_json())
+            # If user_data is a list (e.g., when many=True), get the first item
+            if isinstance(user_data, list):
+                user_data = user_data[0]
+        except Exception as err: # Use ValidationError if using Marshmallow's ValidationError
+            return {"message": str(err)}, 400
+        if not user_data:
+            return {"message": "Invalid input data"}, 400
+
+        if Users.find_by_username(user_data["username"]):
+            return {"message": "Username already exists"}, 409
+        if Users.find_by_email(user_data["email"]):
+            return {"message": "Email already exists"}, 409
+        if Users.find_by_phone(user_data.get("phone")):
+            return {"message": "Phone number already exists"}, 409
+
+        user = Users(
+            firstname=user_data.get("firstname"),
+            lastname=user_data.get("lastname"),
+            username=user_data["username"],
+            email=user_data["email"],
+            gender=user_data.get("gender"),
+            phone=user_data.get("phone"),
+            password=user_data["password"], # This calls set_password
+            is_verified=False # New users are not verified by default
+        )
+
+        # Generate email verification token
+        user.email_verification_token = str(uuid.uuid4())
+        # For a real app, send this token to the user's email address
+        # e.g., send_verification_email(user.email, user.email_verification_token)
+
+        try:
+            user.save_to_db()
+            return {"message": "User created successfully. Please check your email to verify your account."}, 201
+        except Exception as e:
+            app.logger.error(f"Error creating user: {e}")
+            return {"message": "Internal server error"}, 500
+
+#---------------------auth/utils.py---------------------
+from functools import wraps
+from flask import request, g, current_app
+import jwt
+
+def jwt_required(allowed_roles=None):
+    def wrapper(f):
+        @wraps(f)
+        def decorator(*args, **kwargs):
+            token = request.headers.get("Authorization")
+            if not token:
+                return {"message": "Missing token"}, 401
+            try:
+                # Use current_app.config to get the SECRET_KEY
+                data = jwt.decode(token.split()[1], current_app.config["SECRET_KEY"], algorithms=["HS256"])
+                if allowed_roles and data["role"] not in allowed_roles:
+                    return {"message": "Forbidden for this role"}, 403
+                g.user = data
+            except jwt.ExpiredSignatureError:
+                return {"message": "Token expired"}, 401
+            except Exception:
+                # This general exception handler is very broad.
+                # Consider logging the actual exception for debugging in dev.
+                return {"message": "Invalid token"}, 401
+            return f(*args, **kwargs)
+        return decorator
+    return wrapper
+
+
+#----------------------------------- Below here are the schemas ----------------------------------
+#-------------------user.py---------------------
+from marshmallow import Schema, fields, validate, post_load, ValidationError
+from app.models import UserRole, VerificationStatus # Import enums from models
+
+
+# Base User Schema - defines common fields for dumping/loading user data
+class UserSchema(Schema):
+    id = fields.Int(dump_only=True)
+    username = fields.String(required=True, validate=validate.Length(min=4, max=50))
+    email = fields.Email(required=True)
+    firstname = fields.String(validate=validate.Length(max=50))
+    lastname = fields.String(validate=validate.Length(max=50))
+    gender = fields.String(validate=validate.OneOf(["Male", "Female", "Other"]))
+    phone = fields.String(validate=validate.Regexp(r'^\+?[0-9]{7,15}$')) # Basic phone number validation
+    role = fields.String(dump_only=True, validate=validate.OneOf([e.value for e in UserRole])) # Role should be dumped as string
+    is_verified = fields.Boolean(dump_only=True)
+    is_active = fields.Boolean(dump_only=True)
+    address = fields.String(validate=validate.Length(max=200))
+    timestamp = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+    last_login_at = fields.DateTime(dump_only=True)
+    email_verified_at = fields.DateTime(dump_only=True)
+    phone_verified_at = fields.DateTime(dump_only=True)
+
+    class Meta:
+        # Explicitly define fields here to ensure they are available for inheritance
+        fields = (
+            "id", "username", "email", "firstname", "lastname", "gender", "phone",
+            "role", "is_verified", "is_active", "address", "timestamp", "updated_at",
+            "last_login_at", "email_verified_at", "phone_verified_at"
+        )
+
+
+# Schema for user registration
+class UserRegisterSchema(UserSchema):
+    password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+    confirm_password = fields.String(required=True, load_only=True)
+
+    class Meta(UserSchema.Meta):
+        # Extend fields from UserSchema.Meta and add password-related fields
+        # Ensure 'password' and 'confirm_password' are load_only
+        fields = UserSchema.Meta.fields + ("password", "confirm_password")
+
+    @post_load
+    def validate_passwords(self, data, **kwargs):
+        if data["password"] != data["confirm_password"]:
+            raise ValidationError("Passwords do not match.", "confirm_password")
+        data.pop("confirm_password") # Remove confirm_password before loading into model
+        return data
+
+
+# Schema for user login
+class UserLoginSchema(Schema):
+    username = fields.String(load_only=True, validate=validate.Length(min=4, max=50))
+    email = fields.Email(load_only=True)
+    password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+
+    @post_load
+    def require_username_or_email(self, data, **kwargs):
+        if not data.get("username") and not data.get("email"):
+            raise ValidationError("Username or email is required.", "username")
+        return data
+
+
+# Schema for updating a user's own profile (non-admin)
+class UserProfileUpdateSchema(Schema):
+    firstname = fields.String(validate=validate.Length(max=50))
+    lastname = fields.String(validate=validate.Length(max=50))
+    email = fields.Email()
+    gender = fields.String(validate=validate.OneOf(["Male", "Female", "Other"]))
+    address = fields.String(validate=validate.Length(max=200))
+    phone = fields.String(validate=validate.Regexp(r'^\+?[0-9]{7,15}$'))
+
+    @post_load
+    def ensure_update_data(self, data, **kwargs):
+        if not data:
+            raise ValidationError("At least one field must be provided for update.", "_schema")
+        return data
+
+
+# Schema for admin updating a user (includes role and active status)
+class UserAdminUpdateSchema(UserProfileUpdateSchema):
+    role = fields.String(validate=validate.OneOf([e.value for e in UserRole]))
+    is_active = fields.Boolean()
+    is_verified = fields.Boolean() # Admin can toggle verification status
+
+
+# Schema for user to change their password
+class UserPasswordChangeSchema(Schema):
+    old_password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+    new_password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+    confirm_new_password = fields.String(required=True, load_only=True)
+
+    @post_load
+    def validate_passwords(self, data, **kwargs):
+        if data["new_password"] != data["confirm_new_password"]:
+            raise ValidationError("New password and confirmation do not match.", "confirm_new_password")
+        return data
+
+
+# Schema for requesting a password reset (providing email)
+class PasswordResetRequestSchema(Schema):
+    email = fields.Email(required=True)
+
+
+# Schema for confirming password reset with token and new password
+class PasswordResetConfirmSchema(Schema):
+    token = fields.String(required=True)
+    new_password = fields.String(required=True, load_only=True, validate=validate.Length(min=8))
+    confirm_new_password = fields.String(required=True, load_only=True)
+
+    @post_load
+    def validate_passwords(self, data, **kwargs):
+        if data["new_password"] != data["confirm_new_password"]:
+            raise ValidationError("New password and confirmation do not match.", "confirm_new_password")
+        return data
+
+
+# Schema for a user requesting a role change (e.g., customer to provider)
+class UserRoleRequestSchema(Schema):
+    # Only allow requesting Provider or B2B_CLIENT roles, not Admin
+    requested_role = fields.String(required=True, validate=validate.OneOf([UserRole.PROVIDER.value, UserRole.B2B_CLIENT.value]))
+    # Optional message for the admin reviewing the request
+    message = fields.String(validate=validate.Length(max=500))
+
+
+# Schema for admin to approve/reject a role change request
+class RoleChangeApprovalSchema(Schema):
+    action = fields.String(required=True, validate=validate.OneOf(["approve", "reject"]))
+    # Optional notes from admin
+    admin_notes = fields.String(validate=validate.Length(max=500))
+
+
+# Schema for Provider-specific profile fields
+class ProviderProfileSchema(Schema):
+    bio = fields.String(validate=validate.Length(max=500))
+    is_available = fields.Boolean()
+    service_radius = fields.Float()
+    service_area_description = fields.String(validate=validate.Length(max=255))
+    # Admin can update verification status
+    verification_status = fields.String(validate=validate.OneOf([e.value for e in VerificationStatus]))
+    verification_document_url = fields.URL() # Assuming this is a URL to a document
+    rating = fields.Float(dump_only=True) # Rating is aggregated, not directly set via schema
+
+    class Meta:
+        fields = (
+            "bio", "is_available", "service_radius", "service_area_description",
+            "verification_status", "verification_document_url", "rating"
+        )
+
+
+class UserUpdateSchema(Schema):
+    firstname = fields.Str()
+    lastname = fields.Str()
+    email = fields.Email()
+    address = fields.Str()
+    phone = fields.Str()
+    gender = fields.Str()
+    # role = fields.Str(validate=validate.OneOf([e.value for e in UserRole]))
+
+#-----------------service.py--------------------
+from marshmallow import Schema, fields, validate, post_load
+from ..models import Service, PricingModel
+
+
+class ServiceSchema(Schema):
+    id = fields.Int(dump_only=True)
+    name = fields.Str(required=True)
+    description = fields.Str(required=True)
+    category_id = fields.Int(required=True)
+    pricing_model = fields.Str(validate=validate.OneOf([e.name for e in PricingModel]))
+    base_price = fields.Float(required=True)
+    unit_label = fields.Str()
+    estimated_duration = fields.Int()
+    requires_materials = fields.Bool()
+    has_add_ons = fields.Bool()
+    is_active = fields.Bool()
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_service(self, data, **kwargs):
+        return Service(**data)
+
+#--------------------review----------------
+from marshmallow import Schema, fields, post_load
+from ..models import Review
+
+class ReviewSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Int(required=True)
+    provider_id = fields.Int(required=True)
+    booking_id = fields.Int(required=True)
+    rating = fields.Int(required=True)
+    comment = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_review(self, data, **kwargs):
+        return Review(**data)
+
+#-----------------provider.py----------------
+from marshmallow import Schema, fields, post_load, validate
+from ..models import Users, UserRole
+
+
+class ProviderSchema(Schema):
+    id = fields.Int(dump_only=True)
+    firstname = fields.Str(required=True)
+    lastname = fields.Str(required=True)
+    username = fields.Str(required=True)
+    email = fields.Email(required=True)
+    phone = fields.Str(required=True)
+    address = fields.Str()
+    gender = fields.Str(validate=validate.OneOf(["Male", "Female", "Other"]))
+    is_verified = fields.Bool(dump_only=True)
+    is_active = fields.Bool()
+    role = fields.Str(dump_only=True)  # Always PROVIDER
+    password = fields.Str(load_only=True, required=True)
+
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_provider(self, data, **kwargs):
+        data["role"] = UserRole.PROVIDER  # Enforce provider role
+        return Users(**data)
+
+#-----------------payment.py------------------------
+from marshmallow import Schema, fields, post_load
+from ..models import Payment
+
+class PaymentSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Int(required=True)
+    booking_id = fields.Int(required=True)
+    amount = fields.Float(required=True)
+    payment_method = fields.Str(required=True)
+    status = fields.Str(required=True)  # e.g. pending, completed, failed
+    transaction_ref = fields.Str()
+    created_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_payment(self, data, **kwargs):
+        return Payment(**data)
+
+#-----------------notification.py----------------------------
+from marshmallow import Schema, fields, post_load
+from ..models import Notifications
+
+class NotificationSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Int(required=True)
+    message = fields.Str(required=True)
+    is_read = fields.Bool()
+    created_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_notification(self, data, **kwargs):
+        return Notifications(**data)
+
+#--------------------category-------------------
+
+
+from marshmallow import Schema, fields, post_load
+from ..models import ServiceCategory
+
+
+class ServiceCategorySchema(Schema):
+    id = fields.Int(dump_only=True)
+    name = fields.Str(required=True)
+
+    @post_load
+    def make_category(self, data, **kwargs):
+        return ServiceCategory(**data)
+
+#----------------booking------------
+from marshmallow import Schema, fields, post_load
+from ..models import Booking
+
+class BookingSchema(Schema):
+    id = fields.Int(dump_only=True)
+    user_id = fields.Int(required=True)
+    provider_id = fields.Int(required=True)
+    service_id = fields.Int(required=True)
+    status = fields.Str(required=True)
+    scheduled_date = fields.Date(required=True)
+    scheduled_time = fields.Time(required=True)
+    address = fields.Str(required=True)
+    notes = fields.Str()
+    total_price = fields.Float()
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_booking(self, data, **kwargs):
+        return Booking(**data)
+
+#------------------booking.py------------------
+from marshmallow import Schema, fields, post_load
+from ..models import ServiceAddOn
+
+
+class ServiceAddOnSchema(Schema):
+    id = fields.Int(dump_only=True)
+    name = fields.Str(required=True)
+    description = fields.Str(required=True)
+    price = fields.Float(required=True)
+    service_id = fields.Int(required=True)
+    created_at = fields.DateTime(dump_only=True)
+    updated_at = fields.DateTime(dump_only=True)
+
+    @post_load
+    def make_addon(self, data, **kwargs):
+        return ServiceAddOn(**data)
+
+
+#--------------utils/decorators.py------------------
+from functools import wraps
+from flask import request, jsonify, g
+from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity, jwt_required as flask_jwt_required, get_jwt
+from app.models import Users, UserRole
+# from app import jwt_blacklist # Assuming you'll add this to app/__init__.py or a separate jwt_manager
+
+# A simple in-memory blacklist for demonstration. For production, use a database.
+# This should ideally be managed by a JWT extension setup in app/__init__.py
+# For now, let's assume `app.jwt_blacklist` is a set.
+# In a real app, you'd use Flask-JWT-Extended's token_in_blocklist_loader.
+class TokenBlacklist:
+    def __init__(self):
+        self.blocked_tokens = set()
+
+    def add(self, jti):
+        self.blocked_tokens.add(jti)
+
+    def is_blocked(self, jti):
+        return jti in self.blocked_tokens
+
+jwt_blacklist = TokenBlacklist() # This would typically be initialized in __init__.py or similar
+
+
+def role_required(required_role: UserRole):
+    def decorator(fn):
+        @wraps(fn)
+        @flask_jwt_required() # Ensure JWT is present and valid
+        def wrapper(*args, **kwargs):
+            claims = get_jwt()
+            user_role_str = claims.get('role')
+            if not user_role_str:
+                return jsonify({"message": "Role not found in token claims."}), 403
+
+            try:
+                user_role = UserRole(user_role_str)
+            except ValueError:
+                return jsonify({"message": "Invalid role in token claims."}), 403
+
+            # Convert roles to a comparable format for checking hierarchy if needed
+            # For now, a direct match is assumed, or specific hierarchy logic can be added
+            # Example for hierarchical roles:
+            # role_hierarchy = {
+            #     UserRole.CUSTOMER: 0,
+            #     UserRole.PROVIDER: 1,
+            #     UserRole.ADMIN: 2
+            # }
+            # if role_hierarchy.get(user_role, -1) < role_hierarchy.get(required_role, 99):
+
+            if user_role != required_role: # For exact role match
+                return jsonify({"message": f"{required_role.value.capitalize()} privileges required"}), 403
+
+            # Optionally, fetch the user object and attach to Flask's g object for easy access
+            user_id = get_jwt_identity()
+            g.user = Users.find_by_id(user_id)
+            if not g.user:
+                return jsonify({"message": "User not found."}), 404
+
+            # Check if the token is blacklisted (for logout)
+            jti = get_jwt()["jti"]
+            if jwt_blacklist.is_blocked(jti):
+                return jsonify({"message": "Token has been revoked."}), 401
+
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# Generic JWT required decorator (can be replaced by flask_jwt_required directly)
+def jwt_required_wrapper(fn):
+    @wraps(fn)
+    @flask_jwt_required()
+    def wrapper(*args, **kwargs):
+        # Attach user to g object for easy access in resources
+        user_id = get_jwt_identity()
+        g.user = Users.find_by_id(user_id)
+        if not g.user:
+            return jsonify({"message": "User not found."}), 404
+
+        # Check if the token is blacklisted (for logout)
+        jti = get_jwt()["jti"]
+        if jwt_blacklist.is_blocked(jti):
+            return jsonify({"message": "Token has been revoked."}), 401
+        return fn(*args, **kwargs)
+    return wrapper
+
+# Original admin_required is replaced by role_required(UserRole.ADMIN)
+# The old admin_required relied on X-User-ID, which is insecure with JWT.
+# You should remove the old admin_required function.
+
+#----------------------------This is the routes here----------------------
+#------------routes.py---------------
+from flask import jsonify
+from marshmallow import ValidationError
+from app import app, jwt, api
+
+from app.resources.notification import NotificationResource
+from app.resources.category import ServiceCategoryListResource, ServiceCategoryResource
+from app.resources.booking import BookingListResource, BookingResource
+from app.resources.user import UserListResource, UserRoleApprovalResource, UserDetailResource, UserProfileUpdateResource, UserRoleRequestResource
+from app.resources.provider import ProviderListResource, ProviderResource
+from app.resources.payment import PaymentListResource, PaymentResource
+from app.resources.service import ServiceListResource, ServiceResource
+from app.resources.review import ReviewListResource, ReviewResource
+from app.resources.notification import NotificationListResource
+from .resources.auth.register import UserRegisterResource 
+from app.resources.admin import AdminStatsResource
+from app.resources.auth.login import UserLoginResource, TokenRefreshResource, UserLogoutResource
+
+
+
+# Users
+api.add_resource(UserListResource, "/all_users")
+api.add_resource(UserDetailResource, "/users/<int:user_id>")
+api.add_resource(UserProfileUpdateResource, "/update")
+api.add_resource(UserRoleRequestResource, "/users/<int:user_id>/request-role")
+api.add_resource(UserRoleApprovalResource, "/users/<int:user_id>/approve-role")
+api.add_resource(ProviderListResource, "/providers")
+api.add_resource(ProviderResource, "/providers/<int:provider_id>")
+
+# Categories
+api.add_resource(ServiceCategoryListResource, "/categories")
+api.add_resource(ServiceCategoryResource, "/categories/<int:category_id>")
+
+# Bookings
+api.add_resource(BookingListResource, "/bookings")
+api.add_resource(BookingResource, "/bookings/<int:booking_id>")
+
+#Payment
+api.add_resource(PaymentListResource, "/payments")
+api.add_resource(PaymentResource, "/payments/<int:payment_id>")
+
+# Services
+api.add_resource(ServiceListResource, "/services")
+api.add_resource(ServiceResource, "/services/<int:service_id>")
+
+
+
+# Reviews
+api.add_resource(ReviewListResource, "/reviews")
+api.add_resource(ReviewResource, "/reviews/<int:review_id>")
+
+# Notifications
+api.add_resource(NotificationListResource, "/notifications")
+api.add_resource(NotificationResource, "/notifications/<int:notification_id>")
+
+
+# User Protection
+api.add_resource(UserRegisterResource, "/auth/v1/register")
+api.add_resource(AdminStatsResource, "/admin/v1/stats")
+api.add_resource(UserLoginResource, '/auth/v1/login')
+api.add_resource(TokenRefreshResource, '/auth/v1/refresh')
+api.add_resource(UserLogoutResource, '/auth/v1/logout')
+
+
+@app.route('/')
+def index():
+    return {"message": "Welcome to the Daily Hustle API! Check /api/v1/health for status."}, 200
+
+
