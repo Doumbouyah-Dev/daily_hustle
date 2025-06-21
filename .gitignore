@@ -41,6 +41,11 @@ backend/*.pyd
 backend/*.pyo
 backend/*.egg-info/
 backend/.eggs/
+backend/workspace.txt
+backend/pydevproject.toml
+backend/file.txt
+
+
 
 # Distribution / packaging
 backend/dist/
