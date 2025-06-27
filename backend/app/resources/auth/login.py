@@ -29,8 +29,10 @@ class UserLoginResource(Resource):
             # Create access and refresh tokens
             # We can add custom claims like user role here
             additional_claims = {"role": user.role.value}
-            access_token = create_access_token(identity=user.id, additional_claims=additional_claims)
-            refresh_token = create_refresh_token(identity=user.id)
+            # access_token = create_access_token(identity=user.id, additional_claims=additional_claims)
+            # refresh_token = create_refresh_token(identity=user.id)
+            access_token = create_access_token(identity=str(user.id), additional_claims={"role": user.role.value})
+            refresh_token = create_refresh_token(identity=str(user.id))
 
             return {
                 "message": "Logged in successfully",

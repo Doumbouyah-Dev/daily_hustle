@@ -1,419 +1,256 @@
+The error still persist. Below are my related codes/files. 
+
+
+#This is my config.py:
+
+from datetime import timedelta
+import os
+
+baseddir = os.path.abspath(os.path.dirname(__file__))
+
+class Config(object):
+    DEBUG = False
+
+    SECRET_KEY = os.environ.get("SECRET_KEY") or "this-is-a-strong-default-secret-key"
+
+    SQLALCHEMY_DATABASE_URI = os.environ.get("SQLALCHEMY_DATABASE_URI") \
+        or "sqlite:///" + os.path.join(baseddir, "app.db")
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    PROPAGATE_EXCEPTIONS = True
+
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15) 
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30) 
+    JWT_TOKEN_LOCATION = ["headers"] 
+    JWT_BLACKLIST_ENABLED = True
+    JWT_BLACKLIST_TOKEN_CHECKS = ["access", "refresh"]
+
+    UPLOADED_IMAGES_DEST = os.path.join("static", "images")
+    MAX_CONTENT_LENGTH = 10 * 1024 * 1024 
+
+
+#This is my app/__init__.py:
+from flask import Flask, jsonify
+from flask_admin import Admin
+from flask_restful import Api
+from flask_jwt_extended import JWTManager
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_marshmallow import Marshmallow
+from flask_cors import CORS
+from flask_uploads import configure_uploads
+from app.libs.image_helper import IMAGE_SET
+from config import Config
+from datetime import timedelta 
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+from flask_jwt_extended import JWTManager
+
+jwt = JWTManager()
+
+app = Flask(__name__)
+app.config.from_object(Config)
+api = Api(app)
+jwt = JWTManager(app)
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+ma = Marshmallow(app)
+CORS(app)
+configure_uploads(app, IMAGE_SET)
+
+
+
+
+from app.utils.decorators import jwt_blacklist
+
+
+@jwt.token_in_blocklist_loader
+def check_if_token_in_blocklist(jwt_header, jwt_payload):
+    jti = jwt_payload["jti"]
+    return jwt_blacklist.is_blocked(jti)
+
+@jwt.unauthorized_loader
+def unauthorized_response(callback):
+    return jsonify({"message": "Missing JWT token or token is invalid."}), 401
+
+@jwt.invalid_token_loader
+def invalid_token_response(callback):
+    return jsonify({"message": "Signature verification failed. Invalid token."}), 403
+
+@jwt.expired_token_loader
+def expired_token_response(jwt_header, jwt_payload):
+    return jsonify({"message": "The token has expired.", "error": "token_expired"}), 401
+
+@jwt.revoked_token_loader
+def revoked_token_response(jwt_header, jwt_payload):
+    return jsonify({"message": "The token has been revoked."}), 401
+
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address, # Rate limit by IP address
+    default_limits=["200 per day", "50 per hour"] # Default for all routes
+)
+
+from app import routes
+from cli import user_cli
+app.cli.add_command(user_cli)
+
+
+#This is my app/utils/decorators.py:
 from functools import wraps
-from flask import request, jsonify
+from flask import request, jsonify, g
+from flask_jwt_extended import jwt_required as flask_jwt_required, get_jwt_identity, get_jwt
 from app.models import Users, UserRole
 
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        user_id = request.headers.get("X-User-ID")
-        if not user_id:
-            return jsonify({"message": "Missing user ID in headers"}), 401
+class TokenBlacklist:
+    def __init__(self):
+        self.blocked_tokens = set()
 
-        user = Users.query.get(user_id)
-        if not user or user.role != UserRole.ADMIN:
-            return jsonify({"message": "Admin privileges required"}), 403
+    def add(self, jti):
+        self.blocked_tokens.add(jti)
 
-        return f(*args, **kwargs)
-    return decorated_function
+    def is_blocked(self, jti):
+        return jti in self.blocked_tokens
+
+jwt_blacklist = TokenBlacklist() 
+
+def role_required(required_role: UserRole):
+   
+    def decorator(fn):
+        @wraps(fn)
+        @flask_jwt_required() 
+        def wrapper(*args, **kwargs):
+            claims = get_jwt() 
+            user_role_str = claims.get('role')
+
+            if not user_role_str:
+                return jsonify({"message": "Role not found in token claims."}), 403
+
+            try:
+                user_role = UserRole(user_role_str)
+            except ValueError:
+                return jsonify({"message": "Invalid role in token claims."}), 403
+
+            if user_role != required_role:
+                return jsonify({"message": f"{required_role.value.capitalize()} privileges required"}), 403
+
+            user_id = get_jwt_identity()
+            g.user = Users.find_by_id(user_id)
+            if not g.user:
+                return jsonify({"message": "User not found."}), 404
+
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def jwt_required_wrapper(fn):
+    
+    @wraps(fn)
+    @flask_jwt_required() # Ensures valid JWT and automatically handles blacklisting check
+    def wrapper(*args, **kwargs):
+        user_id = get_jwt_identity()
+        g.user = Users.find_by_id(user_id)
+        if not g.user:
+            return jsonify({"message": "User not found."}), 404
+        return fn(*args, **kwargs)
+    return wrapper
 
 
-from flask import request,  current_app
+#This is my app/resources/admin.py:
 from flask_restful import Resource
-from ...models import Users
-from werkzeug.security import check_password_hash
-import jwt
-import datetime
-
-
-class LoginResource(Resource):
-    def post(self):
-        data = request.get_json()
-        user = Users.query.filter_by(email=data["email"]).first()
-
-        if user and check_password_hash(user.password, data["password"]):
-            token = jwt.encode({
-                "user_id": user.id,
-                "role": user.role.name,
-                "exp": datetime.datetime.utcnow() + datetime.timedelta(days=1)
-            }, current_app.config["SECRET_KEY"], algorithm="HS256") # Use app.config
-            return {"access_token": token}, 200
-        return {"message": "Invalid credentials"}, 401
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-from typing import List
-from datetime import datetime, date, timedelta
-from sqlalchemy.dialects.mysql import LONGTEXT
-from sqlalchemy import or_
-from werkzeug.security import generate_password_hash, check_password_hash
-import hashlib
-import pytz
-import moment
-from app import app, db # Assuming 'app' and 'db' are initialized correctly in app/__init__.py
-import enum
-
-
-# -------------------- Enums --------------------
-
-class UserRole(enum.Enum):
-    CUSTOMER = "customer"
-    PROVIDER = "provider"
-    ADMIN = "admin"
-    B2B_CLIENT = "b2b_client"
-
-class PricingModel(enum.Enum):
-    FIXED = "fixed"
-    HOURLY = "hourly"
-    AREA_BASED = "area_based"
-
-class BookingStatus(enum.Enum):
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-
-
-class Users(db.Model):
-    __tablename__ = 'users' # Explicitly set table name for clarity
-    id = db.Column(db.Integer, primary_key=True, index=True)
-    firstname = db.Column(db.String(50))
-    lastname = db.Column(db.String(50))
-    username = db.Column(db.String(50), unique=True, nullable=False, index=True)
-    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
-    gender = db.Column(db.String(10))
-    role = db.Column(db.Enum(UserRole), default=UserRole.CUSTOMER, nullable=False)
-    is_verified = db.Column(db.Boolean, default=False)
-    is_active = db.Column(db.Boolean, default=True) # For soft delete
-    address = db.Column(db.String(200))
-    phone = db.Column(db.String(20), unique=True, index=True)
-    password = db.Column(db.String(255), nullable=False)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    last_login_at = db.Column(db.DateTime, nullable=True) # New field for last login timestamp
-    email_verification_token = db.Column(db.String(255), nullable=True) # New field for email verification token
-    email_verified_at = db.Column(db.DateTime, nullable=True) # New field for email verification timestamp
-    phone_verification_token = db.Column(db.String(255), nullable=True) # New field for phone verification token
-    phone_verified_at = db.Column(db.DateTime, nullable=True) # New field for phone verification timestamp
-    password_reset_token = db.Column(db.String(255), nullable=True) # New field for password reset token
-    password_reset_expiration = db.Column(db.DateTime, nullable=True) # New field for password reset token expiration
-
-    provider = db.relationship('Provider', backref='user', uselist=False, lazy='joined', cascade="all, delete-orphan")
-    bookings = db.relationship('Booking', backref='customer', lazy='dynamic')
-    payments = db.relationship('Payment', backref='user', lazy='dynamic')
-    reviews = db.relationship('Review', backref='user', lazy='dynamic')
-    notifications = db.relationship('Notifications', backref='user', lazy='dynamic')
-
-
-    def __init__(self, **kwargs):
-        super(Users, self).__init__(**kwargs)
-        if 'password' in kwargs:
-            # Use bcrypt by explicitly specifying the method
-            self.set_password(kwargs['password'])
-
-    def set_password(self, password):
-        self.password = generate_password_hash(password, method='bcrypt')
-
-    def check_password(self, password):
-        return check_password_hash(self.password, password)
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        # Soft delete for Users model
-        if self.__tablename__ == 'users':
-            self.is_active = False
-            db.session.add(self)
-        else:
-            db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_username(cls, username):
-        return cls.query.filter_by(username=username).first()
-
-    @classmethod
-    def find_by_email(cls, email):
-        return cls.query.filter_by(email=email).first()
-
-    @classmethod
-    def find_by_phone(cls, phone):
-        return cls.query.filter_by(phone=phone).first()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-
-
-class ServiceCategory(db.Model):
-    __tablename__ = 'service_categories'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
-    description = db.Column(db.String(255), nullable=True)
-
-    services = db.relationship('Service', backref='category', lazy='dynamic')
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_name(cls, name):
-        return cls.query.filter_by(name=name).first()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-    @classmethod
-    def find_all(cls):
-        return cls.query.all()
-
-
-
-class Service(db.Model):
-    __tablename__ = 'services'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    description = db.Column(LONGTEXT, nullable=True)
-    category_id = db.Column(db.Integer, db.ForeignKey('service_categories.id', ondelete='SET NULL'), nullable=True)
-    pricing_model = db.Column(db.Enum(PricingModel), default=PricingModel.FIXED, nullable=False)
-    base_price = db.Column(db.Float, nullable=False)
-    unit_label = db.Column(db.String(50), nullable=True) # e.g., "per hour", "per sq meter", "fixed"
-    estimated_duration = db.Column(db.Integer, nullable=True) # in minutes
-    requires_materials = db.Column(db.Boolean, default=False)
-    has_add_ons = db.Column(db.Boolean, default=False)
-    is_active = db.Column(db.Boolean, default=True) # Allows deactivating a service
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    add_ons = db.relationship('ServiceAddOn', backref='service', lazy='dynamic', cascade="all, delete-orphan")
-    bookings = db.relationship('Booking', backref='service', lazy='dynamic')
-    providers = db.relationship('ProviderService', backref='service', lazy='dynamic', cascade="all, delete-orphan")
-
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-    @classmethod
-    def find_by_name(cls, name):
-        return cls.query.filter_by(name=name).first()
-
-    @classmethod
-    def find_all(cls):
-        return cls.query.all()
-
-
-class Provider(db.Model):
-    __tablename__ = 'providers'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), unique=True, nullable=False)
-    bio = db.Column(db.String(500), nullable=True)
-    rating = db.Column(db.Float, default=5.0)
-    is_available = db.Column(db.Boolean, default=True)
-
-    bookings = db.relationship('Booking', backref='provider', lazy='dynamic')
-    reviews_received = db.relationship('Review', backref='provider', lazy='dynamic')
-    services_offered = db.relationship('ProviderService', backref='provider', lazy='dynamic', cascade="all, delete-orphan")
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-    @classmethod
-    def find_by_user_id(cls, user_id):
-        return cls.query.filter_by(user_id=user_id).first()
-
-
-class ServiceAddOn(db.Model):
-    __tablename__ = 'service_add_ons'
-    id = db.Column(db.Integer, primary_key=True)
-    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
-    name = db.Column(db.String(100), nullable=False)
-    price = db.Column(db.Float, nullable=False)
-    is_active = db.Column(db.Boolean, default=True) # Allows deactivating an add-on
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-
-class ProviderService(db.Model):
-    __tablename__ = 'provider_services'
-    id = db.Column(db.Integer, primary_key=True)
-    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
-    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='CASCADE'), nullable=False)
-    # Could add specific pricing for this provider-service combination if needed
-    # price = db.Column(db.Float, nullable=True)
-
-    # Ensures a provider offers a specific service only once
-    __table_args__ = (db.UniqueConstraint('provider_id', 'service_id', name='_provider_service_uc'),)
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-# -------------------- Bookings --------------------
-class Booking(db.Model):
-    __tablename__ = 'bookings'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='SET NULL'), nullable=True)
-    service_id = db.Column(db.Integer, db.ForeignKey('services.id', ondelete='SET NULL'), nullable=False)
-    status = db.Column(db.Enum(BookingStatus), default=BookingStatus.PENDING, nullable=False)
-    scheduled_at = db.Column(db.DateTime, nullable=False)
-    location = db.Column(db.String(255), nullable=False) # e.g., client's address
-    notes = db.Column(LONGTEXT, nullable=True)
-    total_cost = db.Column(db.Float, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    payment = db.relationship('Payment', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
-    review = db.relationship('Review', backref='booking', uselist=False, lazy='joined', cascade="all, delete-orphan")
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-
-class Payment(db.Model):
-    __tablename__ = 'payments'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    payment_method = db.Column(db.String(50), nullable=True) # e.g., "credit_card", "paypal", "cash"
-    status = db.Column(db.String(20), default="pending", nullable=False) # e.g., "pending", "completed", "failed", "refunded"
-    transaction_ref = db.Column(db.String(100), unique=True, nullable=True) # Payment gateway transaction reference
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-    @classmethod
-    def find_by_booking_id(cls, booking_id):
-        return cls.query.filter_by(booking_id=booking_id).first()
-
-
-class Review(db.Model):
-    __tablename__ = 'reviews'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    provider_id = db.Column(db.Integer, db.ForeignKey('providers.id', ondelete='CASCADE'), nullable=False)
-    booking_id = db.Column(db.Integer, db.ForeignKey('bookings.id', ondelete='CASCADE'), unique=True, nullable=False)
-    rating = db.Column(db.Integer, nullable=False) # e.g., 1 to 5 stars
-    comment = db.Column(LONGTEXT, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-
-class Notifications(db.Model):
-    __tablename__ = 'notifications'
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
-    message = db.Column(LONGTEXT, nullable=False)
-    type = db.Column(db.String(50), nullable=True) # e.g., "booking_confirmation", "payment_alert", "system_message"
-    status = db.Column(db.String(20), default="sent", nullable=False) # e.g., "sent", "delivered", "failed"
-    is_read = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    def save_to_db(self):
-        db.session.add(self)
-        db.session.commit()
-
-    def delete_from_db(self):
-        db.session.delete(self)
-        db.session.commit()
-
-    @classmethod
-    def find_by_id(cls, _id):
-        return cls.query.filter_by(id=_id).first()
-
-    @classmethod
-    def find_all_for_user(cls, user_id):
-        return cls.query.filter_by(user_id=user_id).order_by(cls.created_at.desc()).all()
-        
-
+from ..models import Users, UserRole
+from ..models import Booking
+from ..models import Service
+from app import db
+from app.utils.decorators import role_required 
+
+
+class AdminStatsResource(Resource):
+    @role_required(UserRole.ADMIN) 
+    def get(self):
+        return {
+            "total_users": Users.query.count(),
+            "total_providers": Users.query.filter_by(role=UserRole.PROVIDER).count(),
+            "total_bookings": Booking.query.count(),
+            "active_services": Service.query.filter_by(is_active=True).count(),
+        }, 200
+
+
+#This is my app/routes.py:
+from flask import jsonify
+from marshmallow import ValidationError
+from app import app, api
+from flask_jwt_extended import jwt_required
+
+
+from app.resources.notification import NotificationResource
+from app.resources.category import ServiceCategoryListResource, ServiceCategoryResource
+from app.resources.booking import BookingListResource, BookingResource
+from app.resources.user import UserListResource, UserRoleApprovalResource, UserDetailResource, UserProfileUpdateResource, UserRoleRequestResource
+from app.resources.provider import ProviderListResource, ProviderResource
+from app.resources.payment import PaymentListResource, PaymentResource
+from app.resources.service import ServiceListResource, ServiceResource
+from app.resources.review import ReviewListResource, ReviewResource
+from app.resources.notification import NotificationListResource
+from .resources.auth.register import UserRegisterResource 
+from app.resources.admin import AdminStatsResource
+from app.resources.auth.login import UserLoginResource, TokenRefreshResource, UserLogoutResource
+
+
+
+# Users
+api.add_resource(UserListResource, "/all_users")
+api.add_resource(UserDetailResource, "/users/<int:user_id>")
+api.add_resource(UserProfileUpdateResource, "/update")
+api.add_resource(UserRoleRequestResource, "/users/<int:user_id>/request-role")
+api.add_resource(UserRoleApprovalResource, "/users/<int:user_id>/approve-role")
+api.add_resource(ProviderListResource, "/providers")
+api.add_resource(ProviderResource, "/providers/<int:provider_id>")
+
+# Categories
+api.add_resource(ServiceCategoryListResource, "/categories")
+api.add_resource(ServiceCategoryResource, "/categories/<int:category_id>")
+
+# Bookings
+api.add_resource(BookingListResource, "/bookings")
+api.add_resource(BookingResource, "/bookings/<int:booking_id>")
+
+#Payment
+api.add_resource(PaymentListResource, "/payments")
+api.add_resource(PaymentResource, "/payments/<int:payment_id>")
+
+# Services
+api.add_resource(ServiceListResource, "/services")
+api.add_resource(ServiceResource, "/services/<int:service_id>")
+
+
+
+# Reviews
+api.add_resource(ReviewListResource, "/reviews")
+api.add_resource(ReviewResource, "/reviews/<int:review_id>")
+
+# Notifications
+api.add_resource(NotificationListResource, "/notifications")
+api.add_resource(NotificationResource, "/notifications/<int:notification_id>")
+
+
+# User Protection
+api.add_resource(UserRegisterResource, "/auth/v1/register")
+api.add_resource(AdminStatsResource, "/admin/v1/stats")
+api.add_resource(UserLoginResource, '/auth/v1/login')
+api.add_resource(TokenRefreshResource, '/auth/v1/refresh')
+api.add_resource(UserLogoutResource, '/auth/v1/logout')
+
+
+
+
+@app.route('/')
+def root_info():
+    return jsonify({
+        "message": "Welcome to your Flask Restful API!",
+        "available_endpoints": {
+            "/auth/register": "POST - Register a new user",
+            # Add other endpoints you have or plan to have
+        }
+    }), 200 
 

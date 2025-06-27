@@ -3,10 +3,11 @@ from ..models import Users, UserRole
 from ..models import Booking
 from ..models import Service
 from app import db
-from .auth.utils import jwt_required
+from app.utils.decorators import role_required # or jwt_required_wrapper
+
 
 class AdminStatsResource(Resource):
-    @jwt_required(allowed_roles=["ADMIN"])
+    @role_required(UserRole.ADMIN) # Use role_required from app.utils.decorators
     def get(self):
         return {
             "total_users": Users.query.count(),

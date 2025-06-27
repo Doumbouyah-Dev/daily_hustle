@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-# from flask_admin import Admin
+from flask_admin import Admin
 from flask_restful import Api
 from flask_jwt_extended import JWTManager
 from flask_sqlalchemy import SQLAlchemy
@@ -19,6 +19,7 @@ jwt = JWTManager()
 
 app = Flask(__name__)
 app.config.from_object(Config)
+print(f"--- Flask App SECRET_KEY: {app.config['SECRET_KEY']} ---")
 api = Api(app)
 jwt = JWTManager(app)
 db = SQLAlchemy(app)
@@ -26,7 +27,6 @@ migrate = Migrate(app, db)
 ma = Marshmallow(app)
 CORS(app)
 configure_uploads(app, IMAGE_SET)
-
 
 
 
@@ -47,6 +47,7 @@ def unauthorized_response(callback):
 
 @jwt.invalid_token_loader
 def invalid_token_response(callback):
+    print(f"--- Invalid Token Error: jwt_header={jwt_header}, jwt_payload={jwt_payload} ---")
     return jsonify({"message": "Signature verification failed. Invalid token."}), 403
 
 @jwt.expired_token_loader
@@ -63,8 +64,7 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"] # Default for all routes
 )
 
+from app import routes
         # return app
 from cli import user_cli
-
-app.cli.add_command(user_cli)
 app.cli.add_command(user_cli)

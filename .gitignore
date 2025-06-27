@@ -29,7 +29,10 @@ tmp/*.log
 # Configuration files (sensitive or local-only)
 .env                    # For python-dotenv, dotenv-webpack, etc.
 .flaskenv               # Flask-specific environment variables
-
+pyproject.toml
+requirements.txt
+workspace.txt
+file.txt
 # ---------------------------------------------------
 # Python Backend Specific (.gitignore for backend/)
 # ---------------------------------------------------

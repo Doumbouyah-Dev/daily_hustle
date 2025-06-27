@@ -1367,6 +1367,8 @@ class UserLogoutResource(Resource):
         jwt_blacklist.add(jti) # Add it to the blacklist
         return {"message": "Successfully logged out"}, 200
 
+
+
 #--------------------auth/password_reset.py-----------------
 from flask_restful import Resource
 from flask import request, jsonify
@@ -1493,31 +1495,66 @@ from flask import request, g, current_app
 import jwt
 
 def jwt_required(allowed_roles=None):
+    """
+    Decorator to ensure a valid JWT is present and optionally check user roles.
+
+    Args:
+        allowed_roles (list, optional): A list of roles that are permitted to access
+                                        the decorated endpoint. If None, any valid
+                                        token (regardless of role) is allowed.
+
+    Returns:
+        function: The decorated function.
+    """
     def wrapper(f):
         @wraps(f)
         def decorator(*args, **kwargs):
-            token = request.headers.get("Authorization")
-            if not token:
+            # Extract the token from the Authorization header
+            token_header = request.headers.get("Authorization")
+
+            if not token_header:
                 return {"message": "Missing token"}, 401
+
             try:
-                # Use current_app.config to get the SECRET_KEY
-                data = jwt.decode(token.split()[1], current_app.config["SECRET_KEY"], algorithms=["HS256"])
-                if allowed_roles and data["role"] not in allowed_roles:
-                    return {"message": "Forbidden for this role"}, 403
+                # Expecting "Bearer <token>"
+                token_type, token_value = token_header.split()
+                if token_type.lower() != "bearer":
+                    return {"message": "Invalid token type. Expected 'Bearer'"}, 401
+
+                # Decode the token using the SECRET_KEY from the Flask app config
+                # This ensures the same key is used for signing and verification
+                data = jwt.decode(
+                    token_value,
+                    current_app.config["SECRET_KEY"], # Use the unified SECRET_KEY
+                    algorithms=["HS256"]
+                )
+
+                # Check if specific roles are allowed and if the user's role matches
+                if allowed_roles and data.get("role") not in allowed_roles:
+                    # Log for debugging: print(f"User role '{data.get('role')}' not in allowed roles {allowed_roles}")
+                    return {"message": "Forbidden: Insufficient permissions for this role"}, 403
+
+                # Store user data from the token in Flask's global context (g)
                 g.user = data
+
             except jwt.ExpiredSignatureError:
                 return {"message": "Token expired"}, 401
-            except Exception:
-                # This general exception handler is very broad.
-                # Consider logging the actual exception for debugging in dev.
+            except jwt.InvalidTokenError:
+                # Catch more specific JWT errors for clearer messages
                 return {"message": "Invalid token"}, 401
+            except Exception as e:
+                # General exception handler for unexpected errors during token processing
+                # In development, consider logging 'e' for detailed debugging
+                current_app.logger.error(f"Error processing JWT: {e}")
+                return {"message": "An error occurred during token validation"}, 401
+
             return f(*args, **kwargs)
         return decorator
     return wrapper
 
 
 #----------------------------------- Below here are the schemas ----------------------------------
-#-------------------user.py---------------------
+#-------------------user.py--------------------- 
 from marshmallow import Schema, fields, validate, post_load, ValidationError
 from app.models import UserRole, VerificationStatus # Import enums from models
 
@@ -1873,16 +1910,7 @@ def role_required(required_role: UserRole):
             except ValueError:
                 return jsonify({"message": "Invalid role in token claims."}), 403
 
-            # Convert roles to a comparable format for checking hierarchy if needed
-            # For now, a direct match is assumed, or specific hierarchy logic can be added
-            # Example for hierarchical roles:
-            # role_hierarchy = {
-            #     UserRole.CUSTOMER: 0,
-            #     UserRole.PROVIDER: 1,
-            #     UserRole.ADMIN: 2
-            # }
-            # if role_hierarchy.get(user_role, -1) < role_hierarchy.get(required_role, 99):
-
+         
             if user_role != required_role: # For exact role match
                 return jsonify({"message": f"{required_role.value.capitalize()} privileges required"}), 403
 
@@ -1993,3 +2021,53 @@ def index():
     return {"message": "Welcome to the Daily Hustle API! Check /api/v1/health for status."}, 200
 
 
+#----------------------------------This us config.py: -------------------------------------
+# from datetime import timedelta
+# import os
+
+
+# baseddir = os.path.abspath(os.path.dirname(__file__))
+
+# class Config(object):
+#     DEBUG = True
+#     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or "super-secret-jwt-key"
+#     # SECRET_KEY = os.environ.get("SECRET_KEY") or "this-is-my-secret-key"
+#     SQLALCHEMY_DATABASE_URI = os.environ.get("SQLALCHEMY_DATABASE_URI") \
+#         or "sqlite:///" + os.path.join(baseddir, "app.db")
+#     SQLALCHEMY_TRACK_MODIFICATIONS = False
+#     PROPAGATE_EXCEPTIONS = True
+#     JWT_BLACKLIST_ENABLED = True
+#     JWT_BLACKLIST_TOKEN_CHECKS = ["access", "refresh"]
+#     UPLOADED_IMAGES_DEST = os.path.join("static", "images")
+#     MAX_CONTENT_LENGTH = 10 * 1024 * 1024
+#     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15) # Short-lived access tokens
+#     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30) # Longer-lived refresh tokens
+#     JWT_TOKEN_LOCATION = ["headers"] # Specify where JWT is expected (e.g., 'Authorization: Bearer <token>')
+#     JWT_BLACKLIST_ENABLED = True
+#     JWT_BLACKLIST_TOKEN_CHECKS = ["access", "refresh"]
+
+    
+from datetime import timedelta
+import os
+
+baseddir = os.path.abspath(os.path.dirname(__file__))
+
+class Config(object):
+    DEBUG = False
+    # Use a single SECRET_KEY for both Flask and JWT operations
+    SECRET_KEY = os.environ.get("SECRET_KEY") or "this-is-a-strong-default-secret-key"
+
+    SQLALCHEMY_DATABASE_URI = os.environ.get("SQLALCHEMY_DATABASE_URI") \
+        or "sqlite:///" + os.path.join(baseddir, "app.db")
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    PROPAGATE_EXCEPTIONS = True
+
+    # JWT configuration, now explicitly using SECRET_KEY for signing/decoding
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15) # Short-lived access tokens
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30) # Longer-lived refresh tokens
+    JWT_TOKEN_LOCATION = ["headers"] # Specify where JWT is expected (e.g., 'Authorization: Bearer <token>')
+    JWT_BLACKLIST_ENABLED = True
+    JWT_BLACKLIST_TOKEN_CHECKS = ["access", "refresh"]
+
+    UPLOADED_IMAGES_DEST = os.path.join("static", "images")
+    MAX_CONTENT_LENGTH = 10 * 1024 * 1024 # 10 MB limit for uploads

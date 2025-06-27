@@ -1,0 +1,2 @@
+Admin Creation: 
+flask user create-admin Doumbouyah-dev doumbouyah3792@gmail.com DoumbouyahKing7768.
